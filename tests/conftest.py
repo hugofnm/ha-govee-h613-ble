@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Generator
 import time
 from typing import Any
@@ -33,6 +34,16 @@ def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
 @pytest.fixture(autouse=True)
 def auto_mock_bluetooth(mock_bluetooth: None) -> None:
     """Never touch a real Bluetooth adapter."""
+
+
+@pytest.fixture(autouse=True)
+def fast_writes() -> Generator[None]:
+    """No write pacing in tests (test_write_pacing checks the real values)."""
+    with (
+        patch("custom_components.govee_h613_ble.const.WRITE_GAP", 0.0),
+        patch("custom_components.govee_h613_ble.const.POWER_ON_SETTLE", 0.0),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -80,6 +91,8 @@ class FakeClient:
     def __init__(self, disconnected_callback: Callable[[Any], None] | None) -> None:
         self.is_connected = True
         self.writes: list[bytes] = []
+        self.times: list[float] = []
+        self.responder: Callable[[bytes], list[bytes]] | None = None
         self.notify: Callable[[Any, bytearray], None] | None = None
         self.fail_writes: Exception | None = None
         self._disconnected_callback = disconnected_callback
@@ -94,6 +107,10 @@ class FakeClient:
         if self.fail_writes is not None:
             raise self.fail_writes
         self.writes.append(bytes(data))
+        self.times.append(time.monotonic())
+        if self.responder is not None and self.notify is not None:
+            for frame in self.responder(bytes(data)):
+                asyncio.get_running_loop().call_soon(self.notify, None, bytearray(frame))
 
     async def disconnect(self) -> None:
         self.is_connected = False

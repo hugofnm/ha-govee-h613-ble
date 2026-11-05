@@ -12,22 +12,27 @@ from homeassistant.components.light import (
     ColorMode,
     LightEntity,
 )
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
+from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse, callback
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_platform
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util.color import color_temperature_to_rgb
+import voluptuous as vol
 
 from . import GoveeH613ConfigEntry
 from .const import DOMAIN
 from .device import DeviceNotFoundError, GoveeH613Device
-from .protocol import KELVIN_MAX, KELVIN_MIN, ha_to_percent, percent_to_ha
+from .protocol import KELVIN_MAX, KELVIN_MIN, frame_from_hex
 
 # The device serialises its own writes; strips are independent of each other.
 PARALLEL_UPDATES = 0
 
 _BLE_ERRORS = (DeviceNotFoundError, *BLEAK_RETRY_EXCEPTIONS)
+
+SERVICE_SEND_RAW = "send_raw"
+ATTR_FRAME = "frame"
+ATTR_LISTEN = "listen"
 
 
 async def async_setup_entry(
@@ -37,6 +42,18 @@ async def async_setup_entry(
 ) -> None:
     """Add the light."""
     async_add_entities([GoveeH613Light(entry.runtime_data)])
+
+    entity_platform.async_get_current_platform().async_register_entity_service(
+        SERVICE_SEND_RAW,
+        {
+            vol.Required(ATTR_FRAME): cv.string,
+            vol.Optional(ATTR_LISTEN, default=1.0): vol.All(
+                vol.Coerce(float), vol.Range(min=0.1, max=5)
+            ),
+        },
+        "async_send_raw",
+        supports_response=SupportsResponse.OPTIONAL,
+    )
 
 
 class GoveeH613Light(LightEntity):
@@ -98,9 +115,7 @@ class GoveeH613Light(LightEntity):
     @property
     def brightness(self) -> int | None:
         """Return the brightness, 0..255."""
-        if (pct := self._device.state.brightness_pct) is None:
-            return None
-        return percent_to_ha(pct)
+        return self._device.brightness
 
     @property
     def color_mode(self) -> ColorMode:
@@ -128,10 +143,6 @@ class GoveeH613Light(LightEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on, with optional brightness / colour / white."""
-        brightness_pct = None
-        if (brightness := kwargs.get(ATTR_BRIGHTNESS)) is not None:
-            brightness_pct = ha_to_percent(brightness)
-
         rgb: tuple[int, int, int] | None = kwargs.get(ATTR_RGB_COLOR)
         kelvin: int | None = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
         white_rgb = None
@@ -141,7 +152,7 @@ class GoveeH613Light(LightEntity):
 
         try:
             await self._device.async_turn_on(
-                brightness_pct=brightness_pct,
+                brightness=kwargs.get(ATTR_BRIGHTNESS),
                 rgb=tuple(rgb) if rgb is not None else None,
                 kelvin=kelvin,
                 white_rgb=white_rgb,
@@ -155,6 +166,22 @@ class GoveeH613Light(LightEntity):
             await self._device.async_turn_off()
         except _BLE_ERRORS as err:
             raise self._error(err) from err
+
+    async def async_send_raw(self, frame: str, listen: float) -> ServiceResponse:
+        """Developer tool: send one raw frame, return what the strip answers."""
+        try:
+            data = frame_from_hex(frame)
+        except ValueError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_frame",
+                translation_placeholders={"frame": frame, "error": str(err)},
+            ) from err
+        try:
+            received = await self._device.async_send_raw(data, listen)
+        except _BLE_ERRORS as err:
+            raise self._error(err) from err
+        return {"sent": data.hex(" "), "received": [bytes.fromhex(h).hex(" ") for h in received]}
 
     def _error(self, err: Exception) -> HomeAssistantError:
         return HomeAssistantError(

@@ -35,10 +35,14 @@
     "step": {
       "init": {
         "data": {
-          "keep_connected": "Garder la connexion Bluetooth ouverte"
+          "keep_connected": "Garder la connexion Bluetooth ouverte",
+          "color_dialect": "Protocole couleur",
+          "brightness_scale": "Échelle de luminosité"
         },
         "data_description": {
-          "keep_connected": "Activé : commandes instantanées, et les changements faits avec le boîtier ou l'app remontent dans Home Assistant, mais un slot de connexion Bluetooth reste occupé et l'app Govee ne peut plus se connecter. Désactivé : connexion uniquement pour les commandes, déconnexion après 30 s."
+          "keep_connected": "Activé : commandes instantanées, et les changements faits avec le boîtier ou l'app remontent dans Home Assistant, mais un slot de connexion Bluetooth reste occupé et l'app Govee ne peut plus se connecter. Désactivé : connexion uniquement pour les commandes, déconnexion après 30 s.",
+          "color_dialect": "La trame couleur que comprend le firmware. Si les couleurs ne font rien, essaie-en une autre (l'action « Envoyer une trame brute » aide à trouver la bonne).",
+          "brightness_scale": "Plage du niveau de luminosité du firmware. Auto passe en 0-255 dès que le ruban annonce un niveau supérieur à 100."
         }
       }
     }
@@ -48,11 +52,44 @@
       "options": {
         "manual": "Saisir une adresse MAC à la main"
       }
+    },
+    "color_dialect": {
+      "options": {
+        "0x0d": "0x0D (H613A/H613B, firmwares récents)",
+        "0x02": "0x02 (rubans RGB anciens)",
+        "0x15": "0x15 (rubans segmentés)"
+      }
+    },
+    "brightness_scale": {
+      "options": {
+        "auto": "Détection automatique",
+        "100": "0-100",
+        "255": "0-255"
+      }
     }
   },
   "exceptions": {
     "cannot_reach": {
       "message": "Impossible de joindre {name} en Bluetooth : {error}"
+    },
+    "invalid_frame": {
+      "message": "Trame invalide {frame} : {error}"
+    }
+  },
+  "services": {
+    "send_raw": {
+      "name": "Envoyer une trame brute",
+      "description": "Outil de développement : envoie une trame BLE brute au ruban et renvoie toutes les notifications qu'il répond.",
+      "fields": {
+        "frame": {
+          "name": "Trame",
+          "description": "Octets en hexadécimal, ex. 33 05 02 ff 00 00. Jusqu'à 19 octets : complétée et checksum ajouté ; 20 octets : envoyée telle quelle."
+        },
+        "listen": {
+          "name": "Écoute",
+          "description": "Durée de collecte des réponses du ruban."
+        }
+      }
     }
   }
 }

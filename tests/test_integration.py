@@ -10,13 +10,15 @@ from homeassistant.config_entries import SOURCE_BLUETOOTH, SOURCE_USER, ConfigEn
 from homeassistant.const import CONF_ADDRESS, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_h613_ble import protocol
 from custom_components.govee_h613_ble.const import (
+    CONF_BRIGHTNESS_SCALE,
+    CONF_COLOR_DIALECT,
     CONF_KEEP_CONNECTED,
     CONF_MODEL,
     DOMAIN,
@@ -132,13 +134,15 @@ async def test_already_configured(hass: HomeAssistant) -> None:
 # --- set-up and light --------------------------------------------------------
 
 
-async def _setup(hass: HomeAssistant, keep_connected: bool = True) -> MockConfigEntry:
+async def _setup(
+    hass: HomeAssistant, keep_connected: bool = True, **options: str
+) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id=ADDRESS,
         title="Govee H613D 3456",
         data={CONF_ADDRESS: ADDRESS, CONF_MODEL: "H613D"},
-        options={CONF_KEEP_CONNECTED: keep_connected},
+        options={CONF_KEEP_CONNECTED: keep_connected, **options},
     )
     entry.add_to_hass(hass)
     inject(hass)
@@ -196,27 +200,34 @@ async def test_commands(hass: HomeAssistant, connector: FakeConnector) -> None:
         {"entity_id": ENTITY_ID, "rgb_color": [255, 0, 0], "brightness": 128},
         blocking=True,
     )
+    # state unknown: power on first, then colour and brightness (0-100 scale)
     assert client.writes == [
         protocol.cmd_power(True),
-        protocol.cmd_rgb(255, 0, 0),
+        protocol.cmd_rgb((255, 0, 0)),
         protocol.cmd_brightness(50),
     ]
     state = hass.states.get(ENTITY_ID)
     assert state.state == STATE_ON
     assert state.attributes["rgb_color"] == (255, 0, 0)
 
-    # hs colour from the UI colour wheel arrives as RGB
+    # already on: a colour change is sent alone (re-powering would make the
+    # firmware restore its saved colour over the new one)
     client.writes.clear()
     await hass.services.async_call(
         "light", "turn_on", {"entity_id": ENTITY_ID, "hs_color": [240, 100]}, blocking=True
     )
-    assert client.writes[1] == protocol.cmd_rgb(0, 0, 255)
+    assert client.writes == [protocol.cmd_rgb((0, 0, 255))]
+
+    # a plain "turn on" always sends power on
+    client.writes.clear()
+    await hass.services.async_call("light", "turn_on", {"entity_id": ENTITY_ID}, blocking=True)
+    assert client.writes == [protocol.cmd_power(True)]
 
     client.writes.clear()
     await hass.services.async_call(
         "light", "turn_on", {"entity_id": ENTITY_ID, "color_temp_kelvin": 2700}, blocking=True
     )
-    white = client.writes[1]
+    (white,) = client.writes
     assert white[:6] == bytes.fromhex("33050dffffff")
     assert (white[6] << 8 | white[7]) == 2700
     state = hass.states.get(ENTITY_ID)
@@ -306,3 +317,115 @@ async def test_options_switch_mode(hass: HomeAssistant, connector: FakeConnector
     await settle(hass)
     assert entry.state is ConfigEntryState.LOADED
     assert not entry.runtime_data.keep_connected
+
+
+# --- behaviour seen on a real H613D ------------------------------------------
+
+# Notifications from the first field log (Hugo's strip, 2026-11-05).
+REAL_ACK_POWER = bytes.fromhex("3301000000000000000000000000000000000032")
+REAL_ACK_COLOR = bytes.fromhex("3305000000000000000000000000000000000036")
+REAL_BRIGHTNESS = bytes.fromhex("aa04ff0000000000000000000000000000000051")
+REAL_COLOR = bytes.fromhex("aa050d00000000000000000000000000000000a2")
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_real_h613d_replies(hass: HomeAssistant, connector: FakeConnector) -> None:
+    await _setup(hass)
+    client = connector.client
+    client.reply(reply("aa0101"))
+    client.reply(REAL_BRIGHTNESS)
+    client.reply(REAL_COLOR)
+    client.reply(REAL_ACK_COLOR)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state.state == STATE_ON
+    # 0xFF > 100: the firmware counts 0-255, so this is full brightness
+    assert state.attributes["brightness"] == 255
+    # "00 00 00" says nothing about what the strip shows: not taken as black
+    assert state.attributes["rgb_color"] is None
+
+    client.writes.clear()
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": ENTITY_ID, "brightness": 128}, blocking=True
+    )
+    assert client.writes == [protocol.cmd_brightness(128)]
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_forced_scale_and_dialect(hass: HomeAssistant, connector: FakeConnector) -> None:
+    await _setup(hass, **{CONF_COLOR_DIALECT: "0x02", CONF_BRIGHTNESS_SCALE: "255"})
+    client = connector.client
+    client.writes.clear()
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": ENTITY_ID, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    assert client.writes == [
+        protocol.cmd_power(True),
+        protocol.build_frame(0x33, 0x05, [0x02, 0xFF, 0x00, 0x00]),
+        protocol.cmd_brightness(255),
+    ]
+
+
+async def test_write_pacing(hass: HomeAssistant, connector: FakeConnector, bluetooth_ready) -> None:
+    """The real gaps: 200 ms between frames, 400 ms more after powering on."""
+    await _setup(hass)
+    client = connector.client
+    with (
+        patch("custom_components.govee_h613_ble.const.WRITE_GAP", 0.2),
+        patch("custom_components.govee_h613_ble.const.POWER_ON_SETTLE", 0.4),
+    ):
+        start = len(client.times)
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": ENTITY_ID, "rgb_color": [1, 2, 3], "brightness": 10},
+            blocking=True,
+        )
+    times = client.times[start:]
+    assert len(times) == 3
+    assert times[1] - times[0] >= 0.4
+    assert times[2] - times[1] >= 0.2
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_send_raw(hass: HomeAssistant, connector: FakeConnector) -> None:
+    await _setup(hass)
+    connector.client.responder = lambda frame: (
+        [REAL_COLOR] if frame == protocol.QUERY_COLOR else [REAL_ACK_COLOR]
+    )
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "send_raw",
+        {"entity_id": ENTITY_ID, "frame": "aa 05 01", "listen": 0.2},
+        blocking=True,
+        return_response=True,
+    )
+    assert response[ENTITY_ID] == {
+        "sent": protocol.QUERY_COLOR.hex(" "),
+        "received": [REAL_COLOR.hex(" ")],
+    }
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "send_raw",
+        {"entity_id": ENTITY_ID, "frame": "33:05:02:ff:00:00", "listen": 0.2},
+        blocking=True,
+        return_response=True,
+    )
+    assert response[ENTITY_ID]["sent"].startswith("33 05 02 ff 00 00")
+    assert response[ENTITY_ID]["received"] == [REAL_ACK_COLOR.hex(" ")]
+
+    with pytest.raises(ServiceValidationError, match="Invalid frame"):
+        await hass.services.async_call(
+            DOMAIN,
+            "send_raw",
+            {"entity_id": ENTITY_ID, "frame": "zz"},
+            blocking=True,
+            return_response=True,
+        )

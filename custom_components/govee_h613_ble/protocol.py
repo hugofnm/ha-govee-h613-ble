@@ -4,37 +4,46 @@ Pure Python, no Home Assistant import, so it can be unit-tested on its own.
 
 Every frame is 20 bytes:
 
-    byte 0       head: 0x33 = command, 0xAA = state query / state reply
+    byte 0       head: 0x33 = command (or its ack), 0xAA = state query / reply
     byte 1       command: 0x01 power, 0x04 brightness, 0x05 colour, 0x06 firmware
     bytes 2..18  payload, zero padded
     byte 19      XOR of bytes 0..18
 
-Commands (written to characteristic ...2b11, write without response):
+Commands (written to characteristic ...2b11, write without response). The strip
+acknowledges each one with ``33 <cmd> 00``; the ack only means "received", a
+frame the firmware does not understand is acked and then ignored.
 
-    33 01 01                    power on
-    33 01 00                    power off
-    33 04 <1..100>              brightness in percent (the app never sends 0)
-    33 05 0D R G B 00 00        manual colour, RGB
-    33 05 0D FF FF FF KH KL WR WG WB
-                                white: Kelvin big-endian (KH KL), then the RGB
-                                the strip should render for that white
+    33 01 01 / 33 01 00          power on / off
+    33 04 <level>                brightness, 0..100 or 0..255 depending on firmware
 
-Queries (same characteristic) and their replies (notified on ...2b10):
+Colour, three dialects seen across Govee firmwares:
 
-    AA 01        -> AA 01 <00|01>                 power state
-    AA 04        -> AA 04 <0..100>                brightness in percent
-    AA 05 01     -> AA 05 0D R G B KH KL ...      colour (Kelvin 0 = RGB mode)
+    0x0D  33 05 0D R G B [KH KL WR WG WB]       H613A/H613B, newer firmwares
+    0x02  33 05 02 R G B                        legacy RGB strips
+    0x15  33 05 15 01 R G B 00 00 00 00 00 FF 7F  segmented (RGBIC) strips
+
+    For white, 0x0D carries the Kelvin (KH KL) and the RGB to render (WR WG WB);
+    0x15 carries the same after its segment byte; 0x02 only gets the RGB.
+
+Queries and replies (notified on ...2b10):
+
+    AA 01        -> AA 01 <00|01>                 power
+    AA 04        -> AA 04 <level>                 brightness (raw level)
+    AA 05 01     -> AA 05 <mode> R G B [KH KL]    colour
     AA 06        -> AA 06 <ASCII firmware>        e.g. "2.04.00"
 
-Sources: Beshelmek/govee_ble_lights (frame + checksum), hardcpp/GoveeBleMqttServer
-(mode 0x0D and 0-100 brightness for H613A/H613D), gilcu3/govee-btled-H613B
-(captured 0xAA replies on the sister model H613B).
+The firmware ignores frames written back-to-back: keep about 200 ms between
+writes.
+
+Sources: Beshelmek/govee_ble_lights (frame, checksum, 0x02/0x15, write pacing),
+hardcpp/GoveeBleMqttServer (0x0D for H613A/H613D), gilcu3/govee-btled-H613B
+(0xAA replies), and captures from a real H613D.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 FRAME_LEN = 20
 PAYLOAD_LEN = FRAME_LEN - 3  # head + command + checksum
@@ -62,7 +71,18 @@ class Cmd(IntEnum):
     FIRMWARE = 0x06
 
 
-MODE_MANUAL = 0x0D  # colour mode used by the H613x family
+class ColorDialect(StrEnum):
+    """How a firmware expects the colour command."""
+
+    MODE_0D = "0x0d"
+    MODE_02 = "0x02"
+    MODE_15 = "0x15"
+
+
+MODE_0D = 0x0D
+MODE_02 = 0x02
+MODE_15 = 0x15
+_SEGMENTS_ALL = (0xFF, 0x7F)
 
 
 def checksum(data: bytes) -> int:
@@ -83,10 +103,27 @@ def build_frame(head: int, cmd: int, payload: bytes | list[int] = b"") -> bytes:
     return body + bytes([checksum(body)])
 
 
+def frame_from_hex(text: str) -> bytes:
+    """Parse user-typed hex ("33 05 02 ff 00 00").
+
+    Up to 19 bytes: padded and checksummed. Exactly 20 bytes: sent as typed.
+    """
+    raw = bytes.fromhex("".join(text.replace(":", " ").replace(",", " ").split()))
+    if len(raw) == FRAME_LEN:
+        return raw
+    if not 2 <= len(raw) < FRAME_LEN:
+        raise ValueError(f"expected 2 to 20 bytes, got {len(raw)}")
+    return build_frame(raw[0], raw[1], raw[2:])
+
+
 def _byte(value: int, name: str) -> int:
     if not 0 <= value <= 0xFF:
         raise ValueError(f"{name} out of range: {value}")
     return value
+
+
+def _rgb(rgb: tuple[int, int, int]) -> list[int]:
+    return [_byte(rgb[0], "red"), _byte(rgb[1], "green"), _byte(rgb[2], "blue")]
 
 
 # --- commands -------------------------------------------------------------
@@ -97,31 +134,39 @@ def cmd_power(on: bool) -> bytes:
     return build_frame(Head.COMMAND, Cmd.POWER, [0x01 if on else 0x00])
 
 
-def cmd_brightness(percent: int) -> bytes:
-    """Brightness 1..100 (the strip ignores anything above 100)."""
-    percent = max(1, min(100, int(percent)))
-    return build_frame(Head.COMMAND, Cmd.BRIGHTNESS, [percent])
+def cmd_brightness(level: int) -> bytes:
+    """Brightness as the firmware's raw level (never 0: that is what power off is for)."""
+    return build_frame(Head.COMMAND, Cmd.BRIGHTNESS, [max(1, min(255, int(level)))])
 
 
-def cmd_rgb(red: int, green: int, blue: int) -> bytes:
+def cmd_rgb(rgb: tuple[int, int, int], dialect: ColorDialect = ColorDialect.MODE_0D) -> bytes:
     """Static RGB colour."""
-    rgb = [_byte(red, "red"), _byte(green, "green"), _byte(blue, "blue")]
-    return build_frame(Head.COMMAND, Cmd.COLOR, [MODE_MANUAL, *rgb])
+    r, g, b = _rgb(rgb)
+    if dialect is ColorDialect.MODE_02:
+        payload = [MODE_02, r, g, b]
+    elif dialect is ColorDialect.MODE_15:
+        payload = [MODE_15, 0x01, r, g, b, 0, 0, 0, 0, 0, *_SEGMENTS_ALL]
+    else:
+        payload = [MODE_0D, r, g, b]
+    return build_frame(Head.COMMAND, Cmd.COLOR, payload)
 
 
-def cmd_white(kelvin: int, white_rgb: tuple[int, int, int]) -> bytes:
-    """White at a colour temperature.
-
-    The H613x is an RGB-only strip: it renders ``white_rgb``, the Kelvin value is
-    what the app reads back to place its slider.
-    """
+def cmd_white(
+    kelvin: int,
+    white_rgb: tuple[int, int, int],
+    dialect: ColorDialect = ColorDialect.MODE_0D,
+) -> bytes:
+    """White at a colour temperature (rendered with RGB on these strips)."""
     kelvin = max(KELVIN_MIN, min(KELVIN_MAX, int(kelvin)))
-    wr, wg, wb = (_byte(c, "white") for c in white_rgb)
-    return build_frame(
-        Head.COMMAND,
-        Cmd.COLOR,
-        [MODE_MANUAL, 0xFF, 0xFF, 0xFF, kelvin >> 8, kelvin & 0xFF, wr, wg, wb],
-    )
+    wr, wg, wb = _rgb(white_rgb)
+    kh, kl = kelvin >> 8, kelvin & 0xFF
+    if dialect is ColorDialect.MODE_02:
+        return cmd_rgb(white_rgb, dialect)
+    if dialect is ColorDialect.MODE_15:
+        payload = [MODE_15, 0x01, 0xFF, 0xFF, 0xFF, kh, kl, wr, wg, wb, *_SEGMENTS_ALL]
+    else:
+        payload = [MODE_0D, 0xFF, 0xFF, 0xFF, kh, kl, wr, wg, wb]
+    return build_frame(Head.COMMAND, Cmd.COLOR, payload)
 
 
 # --- queries --------------------------------------------------------------
@@ -138,6 +183,13 @@ STATE_QUERIES: tuple[bytes, ...] = (QUERY_POWER, QUERY_BRIGHTNESS, QUERY_COLOR)
 
 
 @dataclass(frozen=True, slots=True)
+class AckReply:
+    """``33 <cmd> 00``: the strip received a command (not that it applied it)."""
+
+    cmd: int
+
+
+@dataclass(frozen=True, slots=True)
 class PowerReply:
     """Reply to AA 01."""
 
@@ -146,22 +198,23 @@ class PowerReply:
 
 @dataclass(frozen=True, slots=True)
 class BrightnessReply:
-    """Reply to AA 04."""
+    """Reply to AA 04, raw level (0..100 or 0..255 depending on firmware)."""
 
-    percent: int
+    level: int
 
 
 @dataclass(frozen=True, slots=True)
 class ColorReply:
-    """Reply to AA 05 01 while the strip is in manual colour mode."""
+    """Reply to AA 05 01 in a manual colour mode (0x0D or 0x02)."""
 
+    mode: int
     rgb: tuple[int, int, int]
     kelvin: int  # 0 when the strip shows an RGB colour
 
 
 @dataclass(frozen=True, slots=True)
 class OtherModeReply:
-    """Reply to AA 05 01 while a scene, music or DIY mode is active."""
+    """Reply to AA 05 01 while a scene, music, DIY or segment mode is active."""
 
     mode: int
 
@@ -173,29 +226,31 @@ class FirmwareReply:
     version: str
 
 
-Reply = PowerReply | BrightnessReply | ColorReply | OtherModeReply | FirmwareReply
+Reply = AckReply | PowerReply | BrightnessReply | ColorReply | OtherModeReply | FirmwareReply
 
 
 def parse_reply(data: bytes) -> Reply | None:
-    """Decode a notification, or return None if it is not a known state reply.
-
-    The strip also echoes 0x33 command frames; those are ignored here.
-    """
-    if len(data) != FRAME_LEN or data[0] != Head.QUERY:
+    """Decode a notification, or return None if it is not a known frame."""
+    if len(data) != FRAME_LEN or checksum(data[:-1]) != data[-1]:
         return None
-    if checksum(data[:-1]) != data[-1]:
+    if data[0] == Head.COMMAND:
+        return AckReply(cmd=data[1])
+    if data[0] != Head.QUERY:
         return None
 
     cmd = data[1]
     if cmd == Cmd.POWER:
         return PowerReply(is_on=data[2] == 0x01)
     if cmd == Cmd.BRIGHTNESS:
-        return BrightnessReply(percent=min(100, data[2]))
+        return BrightnessReply(level=data[2])
     if cmd == Cmd.COLOR:
-        if data[2] != MODE_MANUAL:
-            return OtherModeReply(mode=data[2])
-        kelvin = (data[6] << 8) | data[7]
-        return ColorReply(rgb=(data[3], data[4], data[5]), kelvin=kelvin)
+        mode = data[2]
+        if mode == MODE_0D:
+            kelvin = (data[6] << 8) | data[7]
+            return ColorReply(mode=mode, rgb=(data[3], data[4], data[5]), kelvin=kelvin)
+        if mode == MODE_02:
+            return ColorReply(mode=mode, rgb=(data[3], data[4], data[5]), kelvin=0)
+        return OtherModeReply(mode=mode)
     if cmd == Cmd.FIRMWARE:
         raw = data[2:-1].split(b"\x00", 1)[0]
         try:
@@ -209,11 +264,11 @@ def parse_reply(data: bytes) -> Reply | None:
 # --- brightness scale helpers ---------------------------------------------
 
 
-def ha_to_percent(brightness: int) -> int:
-    """Home Assistant 1..255 -> strip 1..100."""
-    return max(1, min(100, round(brightness * 100 / 255)))
+def ha_to_level(brightness: int, scale: int) -> int:
+    """Home Assistant 1..255 -> firmware 1..scale."""
+    return max(1, min(scale, round(brightness * scale / 255)))
 
 
-def percent_to_ha(percent: int) -> int:
-    """Strip 0..100 -> Home Assistant 0..255."""
-    return max(0, min(255, round(percent * 255 / 100)))
+def level_to_ha(level: int, scale: int) -> int:
+    """Firmware 0..scale -> Home Assistant 0..255."""
+    return max(0, min(255, round(min(level, scale) * 255 / scale)))

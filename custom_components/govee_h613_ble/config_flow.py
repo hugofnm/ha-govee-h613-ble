@@ -25,13 +25,18 @@ from homeassistant.helpers.selector import (
 import voluptuous as vol
 
 from .const import (
+    CONF_BRIGHTNESS_SCALE,
+    CONF_COLOR_DIALECT,
     CONF_KEEP_CONNECTED,
     CONF_MODEL,
+    DEFAULT_BRIGHTNESS_SCALE,
+    DEFAULT_COLOR_DIALECT,
     DEFAULT_KEEP_CONNECTED,
     DOMAIN,
     SUPPORTED_MODELS,
     model_from_name,
 )
+from .protocol import ColorDialect
 
 _MAC_RE = re.compile(r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 _MANUAL = "manual"
@@ -165,15 +170,42 @@ class GoveeH613ConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class GoveeH613OptionsFlow(OptionsFlow):
-    """Connection mode."""
+    """Connection mode and firmware dialect."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(data=user_input)
 
-        current = self.config_entry.options.get(CONF_KEEP_CONNECTED, DEFAULT_KEEP_CONNECTED)
+        options = self.config_entry.options
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema({vol.Required(CONF_KEEP_CONNECTED, default=current): bool}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_KEEP_CONNECTED,
+                        default=options.get(CONF_KEEP_CONNECTED, DEFAULT_KEEP_CONNECTED),
+                    ): bool,
+                    vol.Required(
+                        CONF_COLOR_DIALECT,
+                        default=options.get(CONF_COLOR_DIALECT, DEFAULT_COLOR_DIALECT),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[d.value for d in ColorDialect],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="color_dialect",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_BRIGHTNESS_SCALE,
+                        default=options.get(CONF_BRIGHTNESS_SCALE, DEFAULT_BRIGHTNESS_SCALE),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["auto", "100", "255"],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="brightness_scale",
+                        )
+                    ),
+                }
+            ),
         )

@@ -1,0 +1,19 @@
+send_raw:
+  target:
+    entity:
+      integration: govee_h613_ble
+      domain: light
+  fields:
+    frame:
+      required: true
+      example: "33 05 02 ff 00 00"
+      selector:
+        text:
+    listen:
+      default: 1
+      selector:
+        number:
+          min: 0.1
+          max: 5
+          step: 0.1
+          unit_of_measurement: s

@@ -32,16 +32,33 @@ def test_power_frames() -> None:
 
 def test_brightness_frame_and_clamp() -> None:
     assert protocol.cmd_brightness(100) == h("3304 64" + "00" * 16 + "53")
-    # never 0 (the app does not send it), never above 100
+    assert protocol.cmd_brightness(255)[2] == 0xFF
+    # never 0: that is what power off is for
     assert protocol.cmd_brightness(0)[2] == 1
-    assert protocol.cmd_brightness(250)[2] == 100
+    assert protocol.cmd_brightness(999)[2] == 0xFF
 
 
-def test_rgb_frame_uses_mode_0x0d() -> None:
-    frame = protocol.cmd_rgb(255, 0, 0)
+def test_rgb_frame_dialects() -> None:
+    frame = protocol.cmd_rgb((255, 0, 0))
     assert frame[:6] == h("33 05 0d ff 00 00")
     assert frame[6:19] == bytes(13)
     assert frame[19] == protocol.checksum(frame[:19])
+
+    legacy = protocol.cmd_rgb((255, 0, 0), protocol.ColorDialect.MODE_02)
+    assert legacy[:6] == h("33 05 02 ff 00 00")
+    assert legacy[6:19] == bytes(13)
+
+    segments = protocol.cmd_rgb((255, 0, 0), protocol.ColorDialect.MODE_15)
+    assert segments[:14] == h("33 05 15 01 ff 00 00 00 00 00 00 00 ff 7f")
+
+
+def test_white_in_each_dialect() -> None:
+    warm = (0xFF, 0x89, 0x12)
+    assert protocol.cmd_white(2000, warm, protocol.ColorDialect.MODE_02) == protocol.cmd_rgb(
+        warm, protocol.ColorDialect.MODE_02
+    )
+    seg = protocol.cmd_white(2000, warm, protocol.ColorDialect.MODE_15)
+    assert seg[:14] == h("33 05 15 01 ff ff ff 07 d0 ff 89 12 ff 7f")
 
 
 def test_white_frame_matches_app_capture() -> None:
@@ -55,14 +72,15 @@ def test_white_frame_matches_app_capture() -> None:
 @pytest.mark.parametrize("value", [-1, 256])
 def test_rgb_out_of_range(value: int) -> None:
     with pytest.raises(ValueError):
-        protocol.cmd_rgb(value, 0, 0)
+        protocol.cmd_rgb((value, 0, 0))
 
 
 def test_every_frame_is_20_bytes_with_valid_checksum() -> None:
     frames = [
         protocol.cmd_power(True),
         protocol.cmd_brightness(42),
-        protocol.cmd_rgb(1, 2, 3),
+        protocol.cmd_rgb((1, 2, 3)),
+        protocol.cmd_rgb((1, 2, 3), protocol.ColorDialect.MODE_15),
         protocol.cmd_white(4000, (255, 213, 161)),
         *protocol.STATE_QUERIES,
         protocol.QUERY_FIRMWARE,
@@ -89,15 +107,21 @@ def test_parse_power() -> None:
 def test_parse_brightness() -> None:
     reply = protocol.parse_reply(h("aa0436" + "00" * 16 + "98"))
     assert reply == protocol.BrightnessReply(54)
+    # a real H613D: raw 0-255 level
+    assert protocol.parse_reply(h("aa04ff" + "00" * 16 + "51")) == protocol.BrightnessReply(255)
 
 
 def test_parse_colour_rgb_and_white() -> None:
     red = protocol.parse_reply(h("aa050dff0000" + "00" * 13 + "5d"))
-    assert red == protocol.ColorReply(rgb=(255, 0, 0), kelvin=0)
+    assert red == protocol.ColorReply(mode=0x0D, rgb=(255, 0, 0), kelvin=0)
 
     body = h("aa050dffffff07d0ff8912" + "00" * 8)
     white = protocol.parse_reply(body + bytes([protocol.checksum(body)]))
-    assert white == protocol.ColorReply(rgb=(255, 255, 255), kelvin=2000)
+    assert white == protocol.ColorReply(mode=0x0D, rgb=(255, 255, 255), kelvin=2000)
+
+    body = h("aa0502102030" + "00" * 13)
+    legacy = protocol.parse_reply(body + bytes([protocol.checksum(body)]))
+    assert legacy == protocol.ColorReply(mode=0x02, rgb=(0x10, 0x20, 0x30), kelvin=0)
 
 
 def test_parse_other_mode() -> None:
@@ -116,12 +140,29 @@ def test_parse_rejects_bad_frames() -> None:
     good = h("aa0101" + "00" * 16 + "aa")
     assert protocol.parse_reply(good[:-1] + b"\x00") is None  # bad checksum
     assert protocol.parse_reply(good[:10]) is None  # too short
-    assert protocol.parse_reply(protocol.cmd_power(True)) is None  # command echo
+    # acks from a real H613D: "received", whatever the command carried
+    assert protocol.parse_reply(h("3301" + "00" * 17 + "32")) == protocol.AckReply(0x01)
+    assert protocol.parse_reply(h("3305" + "00" * 17 + "36")) == protocol.AckReply(0x05)
 
 
-def test_brightness_scale_round_trip() -> None:
-    assert protocol.ha_to_percent(255) == 100
-    assert protocol.ha_to_percent(1) == 1
-    assert protocol.percent_to_ha(100) == 255
-    for pct in range(1, 101):
-        assert protocol.ha_to_percent(protocol.percent_to_ha(pct)) == pct
+def test_frame_from_hex() -> None:
+    assert protocol.frame_from_hex("33 05 02 ff 00 00") == protocol.cmd_rgb(
+        (255, 0, 0), protocol.ColorDialect.MODE_02
+    )
+    assert protocol.frame_from_hex("aa:05:01") == protocol.QUERY_COLOR
+    full = protocol.cmd_power(True).hex()
+    assert protocol.frame_from_hex(full) == protocol.cmd_power(True)
+    for bad in ("", "33", "zz 01", "00" * 21):
+        with pytest.raises(ValueError):
+            protocol.frame_from_hex(bad)
+
+
+@pytest.mark.parametrize("scale", [100, 255])
+def test_brightness_scale_round_trip(scale: int) -> None:
+    assert protocol.ha_to_level(255, scale) == scale
+    assert protocol.ha_to_level(1, scale) == 1
+    assert protocol.level_to_ha(scale, scale) == 255
+    for level in range(1, scale + 1):
+        assert protocol.ha_to_level(protocol.level_to_ha(level, scale), scale) == level
+    # a 0-255 reading interpreted on a 0-100 scale is capped, never above 255
+    assert protocol.level_to_ha(255, 100) == 255

@@ -6,7 +6,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant
 
-from .const import CONF_KEEP_CONNECTED, CONF_MODEL, DEFAULT_KEEP_CONNECTED, DOMAIN
+from .const import (
+    CONF_BRIGHTNESS_SCALE,
+    CONF_COLOR_DIALECT,
+    CONF_KEEP_CONNECTED,
+    CONF_MODEL,
+    DEFAULT_BRIGHTNESS_SCALE,
+    DEFAULT_COLOR_DIALECT,
+    DEFAULT_KEEP_CONNECTED,
+    DOMAIN,
+)
 from .device import GoveeH613Device
 
 PLATFORMS: list[Platform] = [Platform.LIGHT]
@@ -22,6 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH613ConfigEntry) ->
         name=entry.title,
         model=entry.data[CONF_MODEL],
         keep_connected=entry.options.get(CONF_KEEP_CONNECTED, DEFAULT_KEEP_CONNECTED),
+        color_dialect=entry.options.get(CONF_COLOR_DIALECT, DEFAULT_COLOR_DIALECT),
+        brightness_scale=entry.options.get(CONF_BRIGHTNESS_SCALE, DEFAULT_BRIGHTNESS_SCALE),
     )
     entry.runtime_data = device
 
@@ -65,5 +76,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: GoveeH613ConfigEntry) -
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: GoveeH613ConfigEntry) -> None:
-    """Reload when the connection mode changes."""
+    """Reload when an option changes."""
     await hass.config_entries.async_reload(entry.entry_id)

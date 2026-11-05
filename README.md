@@ -46,12 +46,30 @@ Requires Home Assistant 2025.3 or newer with the Bluetooth integration working.
 | Option | Default | Effect |
 | --- | --- | --- |
 | Keep the Bluetooth connection open | on | Instant commands and live state; uses one connection slot of the adapter/proxy permanently, and the Govee app cannot connect meanwhile. Turn off to connect only when sending a command. |
+| Colour protocol | `0x0D` | Colour frame the firmware understands: `0x0D`, `0x02` (legacy) or `0x15` (segmented). H613D firmwares differ; if colours do nothing, find the right one with **Send raw frame** below. |
+| Brightness scale | auto | `0-100` or `0-255`. Auto switches to 0-255 as soon as the strip reports a level above 100. |
+
+### Finding the right frames: Send raw frame
+
+Developer tools → Actions → **Govee H613x BLE: Send raw frame**, pick the light, tick
+*return response*:
+
+```yaml
+action: govee_h613_ble.send_raw
+target:
+  entity_id: light.govee_h613d_aa36
+data:
+  frame: "33 05 02 ff 00 00"   # checksum added for you
+```
+
+The response lists what the strip answered (`33 05 00` is only an ack: the firmware
+acks frames it then ignores, so watch the strip itself).
 
 ## Supported models
 
 | Model | Status | Notes |
 | --- | --- | --- |
-| H613D | Protocol documented, field reports welcome | 2 × 10 m RGB strip, mode `0x0D`, brightness 0–100 |
+| H613D | Field-tested: power, state read-back; reports brightness 0–255 | 2 × 10 m RGB strip; colour dialect varies by firmware (see options) |
 | H613B | Protocol captured by gilcu3 on real hardware | same frames |
 | H613A | Listed with the same mode by hardcpp | same frames |
 
@@ -63,12 +81,14 @@ Requires Home Assistant 2025.3 or newer with the Bluetooth integration working.
 | Purpose | Frame |
 | --- | --- |
 | Power on / off | `33 01 01` / `33 01 00` |
-| Brightness | `33 04 <1..100>` |
-| RGB | `33 05 0D RR GG BB` |
+| Brightness | `33 04 <level>` (0–100 or 0–255 depending on firmware) |
+| RGB | `33 05 0D RR GG BB` · `33 05 02 RR GG BB` · `33 05 15 01 RR GG BB 00×5 FF 7F` |
 | White | `33 05 0D FF FF FF <K hi> <K lo> WR WG WB` |
 | Query power / brightness / colour / firmware | `AA 01` / `AA 04` / `AA 05 01` / `AA 06` |
 
-The full description lives in [`protocol.py`](custom_components/govee_h613_ble/protocol.py).
+Every command is acked with `33 <cmd> 00`, even one the firmware ignores. Frames written
+back-to-back are dropped: the integration keeps 200 ms between writes. The full
+description lives in [`protocol.py`](custom_components/govee_h613_ble/protocol.py).
 
 ## Troubleshooting
 
@@ -92,12 +112,27 @@ logger:
 - In on-demand mode, state changes made outside Home Assistant are only seen at the next
   connection.
 
+## Brand images
+
+Home Assistant 2026.3+ shows images placed in `custom_components/govee_h613_ble/brand/`
+(`icon.png`, `icon@2x.png`, `logo.png`, `logo@2x.png`, optional `dark_` variants). This
+repository ships none: Govee's logo is Govee's. To use the official Govee images that Home
+Assistant's brands repository already serves for its Govee integrations:
+
+```bash
+cd custom_components/govee_h613_ble && mkdir -p brand
+for f in icon icon@2x logo logo@2x; do
+  curl -fsSL -o "brand/$f.png" \
+    "https://raw.githubusercontent.com/home-assistant/brands/master/core_brands/govee/$f.png"
+done
+```
+
 ## Development
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-pytest            # 28 tests: protocol frames + config flow + light on a real HA core
+pytest            # protocol frames + config flow + light on a real HA core
 ruff check . && ruff format --check .
 ```
 
@@ -112,5 +147,3 @@ Protocol knowledge from [Beshelmek/govee_ble_lights](https://github.com/Beshelme
 state replies). No code was copied.
 
 Not affiliated with or endorsed by Govee. MIT licence.
-
-Made using AI - Claude Opus 5.5

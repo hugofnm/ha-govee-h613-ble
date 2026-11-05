@@ -2,13 +2,16 @@
 
 Two connection modes:
 
-* persistent (default): one connection held open; the state is queried every
-  few seconds, which is also the keep-alive the strip expects. Commands land
-  instantly and changes made with the control box or the remote show up in
-  Home Assistant.
+* persistent (default): one connection held open; the power state is queried
+  every few seconds (brightness and colour less often), which is also the
+  keep-alive the strip expects. Commands land instantly and changes made with
+  the control box or the remote show up in Home Assistant.
 * on demand: connect for a command, disconnect after a short idle delay. Frees
   the adapter slot and lets the Govee app connect, but the state is only read
   back when Home Assistant talks to the strip.
+
+Every write goes through one paced queue: the firmware silently drops frames
+that arrive back-to-back.
 """
 
 from __future__ import annotations
@@ -32,20 +35,16 @@ from homeassistant.components import bluetooth
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 
-from . import protocol
-from .const import (
-    COMMAND_GRACE,
-    IDLE_DISCONNECT_DELAY,
-    KEEPALIVE_INTERVAL,
-    RECONNECT_MAX_DELAY,
-    RECONNECT_MIN_DELAY,
-)
+from . import const, protocol
 
 _LOGGER = logging.getLogger(__name__)
 
 # Persistent mode: stay "available" this long after the last successful
 # exchange, so a quick reconnect does not make the entity flap.
 _RECONNECT_GRACE = 20.0
+
+# A write item is a frame, or a pause in seconds before the next frame.
+WriteItem = bytes | float
 
 
 class DeviceNotFoundError(Exception):
@@ -57,7 +56,7 @@ class GoveeState:
     """Last known state of the strip."""
 
     is_on: bool | None = None
-    brightness_pct: int | None = None
+    brightness_level: int | None = None  # raw firmware level
     rgb: tuple[int, int, int] | None = None
     kelvin: int | None = None  # set while the strip shows white
     other_mode: int | None = None  # scene / music / DIY mode byte, if any
@@ -72,7 +71,10 @@ class GoveeH613Device:
         address: str,
         name: str,
         model: str,
-        keep_connected: bool,
+        *,
+        keep_connected: bool = const.DEFAULT_KEEP_CONNECTED,
+        color_dialect: str = const.DEFAULT_COLOR_DIALECT,
+        brightness_scale: str = const.DEFAULT_BRIGHTNESS_SCALE,
     ) -> None:
         """Initialise."""
         self.hass = hass
@@ -80,6 +82,9 @@ class GoveeH613Device:
         self.name = name
         self.model = model
         self.keep_connected = keep_connected
+        self.color_dialect = protocol.ColorDialect(color_dialect)
+        self._scale_setting = brightness_scale
+        self._detected_scale: int | None = None
         self.state = GoveeState()
         self.firmware: str | None = None
 
@@ -88,8 +93,12 @@ class GoveeH613Device:
         self._write_lock = asyncio.Lock()
         self._callbacks: list[Callable[[], None]] = []
         self._cancel_idle: CALLBACK_TYPE | None = None
+        self._last_write = 0.0
         self._last_command = 0.0
         self._last_ok: float | None = None
+        self._refresh_pending = True
+        self._poll_paused_until = 0.0
+        self._probes: list[list[str]] = []
         self._present = False
         self._logged_unavailable = False
         self._stopping = False
@@ -109,6 +118,20 @@ class GoveeH613Device:
         if self.keep_connected:
             return self._last_ok is not None and time.monotonic() - self._last_ok < _RECONNECT_GRACE
         return self._present
+
+    @property
+    def brightness_scale(self) -> int:
+        """Top of the firmware's brightness range: 100 or 255."""
+        if self._scale_setting in ("100", "255"):
+            return int(self._scale_setting)
+        return self._detected_scale or 100
+
+    @property
+    def brightness(self) -> int | None:
+        """Brightness on Home Assistant's 0..255 scale."""
+        if (level := self.state.brightness_level) is None:
+            return None
+        return protocol.level_to_ha(level, self.brightness_scale)
 
     @callback
     def async_register_callback(self, cb: Callable[[], None]) -> CALLBACK_TYPE:
@@ -166,10 +189,20 @@ class GoveeH613Device:
 
     async def async_keepalive_loop(self) -> None:
         """Persistent mode: hold the link open and poll the state forever."""
-        delay = RECONNECT_MIN_DELAY
+        delay = const.RECONNECT_MIN_DELAY
+        cycle = 0
         while not self._stopping:
+            if time.monotonic() < self._poll_paused_until:
+                await asyncio.sleep(0.2)
+                continue
+
+            full = cycle % const.FULL_REFRESH_EVERY == 0 or (
+                self._refresh_pending
+                and time.monotonic() - self._last_command > const.COMMAND_GRACE
+            )
+            queries = protocol.STATE_QUERIES if full else (protocol.QUERY_POWER,)
             try:
-                await self._async_write(protocol.STATE_QUERIES, command=False)
+                await self._async_write(queries, command=False)
             except Exception as err:
                 if not self._logged_unavailable:
                     _LOGGER.warning(
@@ -182,14 +215,17 @@ class GoveeH613Device:
                 await self._async_disconnect()
                 self._async_fire()
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, RECONNECT_MAX_DELAY)
+                delay = min(delay * 2, const.RECONNECT_MAX_DELAY)
                 continue
 
+            if full:
+                self._refresh_pending = False
             if self._logged_unavailable:
                 _LOGGER.info("%s: connection restored", self.name)
                 self._logged_unavailable = False
-            delay = RECONNECT_MIN_DELAY
-            await asyncio.sleep(KEEPALIVE_INTERVAL)
+            delay = const.RECONNECT_MIN_DELAY
+            cycle += 1
+            await asyncio.sleep(const.KEEPALIVE_INTERVAL)
 
     async def async_refresh(self) -> None:
         """Read the state once (connects if needed)."""
@@ -205,29 +241,40 @@ class GoveeH613Device:
     async def async_turn_on(
         self,
         *,
-        brightness_pct: int | None = None,
+        brightness: int | None = None,
         rgb: tuple[int, int, int] | None = None,
         kelvin: int | None = None,
         white_rgb: tuple[int, int, int] | None = None,
     ) -> None:
-        """Turn on, optionally changing colour / white / brightness."""
-        frames = [protocol.cmd_power(True)]
-        if rgb is not None:
-            frames.append(protocol.cmd_rgb(*rgb))
-        elif kelvin is not None and white_rgb is not None:
-            frames.append(protocol.cmd_white(kelvin, white_rgb))
-        if brightness_pct is not None:
-            frames.append(protocol.cmd_brightness(brightness_pct))
+        """Turn on, optionally changing colour / white / brightness (0..255)."""
+        white = kelvin is not None and white_rgb is not None
+        changes = rgb is not None or white or brightness is not None
 
-        await self._async_write(frames, command=True)
+        items: list[WriteItem] = []
+        # A plain "turn on" always sends power on. When only colour or brightness
+        # change on a strip known to be on, skip it: re-powering makes the
+        # firmware restore its saved state over the new one.
+        if self.state.is_on is not True or not changes:
+            items.append(protocol.cmd_power(True))
+            if changes:
+                items.append(const.POWER_ON_SETTLE)
+        if rgb is not None:
+            items.append(protocol.cmd_rgb(rgb, self.color_dialect))
+        elif white:
+            items.append(protocol.cmd_white(kelvin, white_rgb, self.color_dialect))
+        if brightness is not None:
+            level = protocol.ha_to_level(brightness, self.brightness_scale)
+            items.append(protocol.cmd_brightness(level))
+
+        await self._async_write(items, command=True)
 
         self.state.is_on = True
         if rgb is not None:
             self.state.rgb, self.state.kelvin, self.state.other_mode = rgb, None, None
-        elif kelvin is not None and white_rgb is not None:
+        elif white:
             self.state.rgb, self.state.kelvin, self.state.other_mode = white_rgb, kelvin, None
-        if brightness_pct is not None:
-            self.state.brightness_pct = max(1, min(100, brightness_pct))
+        if brightness is not None:
+            self.state.brightness_level = protocol.ha_to_level(brightness, self.brightness_scale)
         self._async_fire()
 
     async def async_turn_off(self) -> None:
@@ -235,6 +282,22 @@ class GoveeH613Device:
         await self._async_write([protocol.cmd_power(False)], command=True)
         self.state.is_on = False
         self._async_fire()
+
+    async def async_send_raw(self, frame: bytes, listen: float) -> list[str]:
+        """Send one raw frame and return every notification seen for ``listen`` s.
+
+        Polling is paused meanwhile so the replies belong to this frame.
+        """
+        received: list[str] = []
+        self._probes.append(received)
+        self._poll_paused_until = time.monotonic() + listen + 5
+        try:
+            await self._async_write([frame], command=True)
+            await asyncio.sleep(listen)
+        finally:
+            self._probes.remove(received)
+            self._poll_paused_until = 0.0
+        return received
 
     # --- connection -------------------------------------------------------
 
@@ -269,8 +332,8 @@ class GoveeH613Device:
                 await client.start_notify(protocol.NOTIFY_CHAR_UUID, self._on_notification)
                 # Ask what the strip is showing right away; the firmware once.
                 first = [] if self.firmware else [protocol.QUERY_FIRMWARE]
-                for frame in (*first, *protocol.STATE_QUERIES):
-                    await client.write_gatt_char(protocol.WRITE_CHAR_UUID, frame, response=False)
+                async with self._write_lock:
+                    await self._async_send_locked(client, [*first, *protocol.STATE_QUERIES])
             except BLEAK_RETRY_EXCEPTIONS:
                 await client.disconnect()
                 raise
@@ -283,20 +346,30 @@ class GoveeH613Device:
         self._async_fire()
         return client
 
-    async def _async_write(self, frames: Iterable[bytes], *, command: bool) -> None:
+    async def _async_send_locked(
+        self, client: BleakClientWithServiceCache, items: Iterable[WriteItem]
+    ) -> None:
+        """Write frames with at least WRITE_GAP between them. Hold _write_lock."""
+        for item in items:
+            if isinstance(item, float):
+                await asyncio.sleep(item)
+                continue
+            if (wait := self._last_write + const.WRITE_GAP - time.monotonic()) > 0:
+                await asyncio.sleep(wait)
+            _LOGGER.debug("%s: -> %s", self.name, item.hex())
+            await client.write_gatt_char(protocol.WRITE_CHAR_UUID, item, response=False)
+            self._last_write = time.monotonic()
+
+    async def _async_write(self, items: Iterable[WriteItem], *, command: bool) -> None:
         """Write frames, reconnecting and retrying once on a BLE error."""
-        frames = list(frames)
+        items = list(items)
         for attempt in (1, 2):
             client = await self._async_ensure_connected()
-            if command:
-                self._last_command = time.monotonic()
             try:
                 async with self._write_lock:
-                    for frame in frames:
-                        _LOGGER.debug("%s: -> %s", self.name, frame.hex())
-                        await client.write_gatt_char(
-                            protocol.WRITE_CHAR_UUID, frame, response=False
-                        )
+                    if command:
+                        self._last_command = time.monotonic()
+                    await self._async_send_locked(client, items)
             except BLEAK_RETRY_EXCEPTIONS:
                 _LOGGER.debug("%s: write failed (attempt %s)", self.name, attempt)
                 await self._async_disconnect()
@@ -306,6 +379,7 @@ class GoveeH613Device:
             self._last_ok = time.monotonic()
             if command:
                 self._last_command = self._last_ok
+                self._refresh_pending = True
             return
 
     async def _async_disconnect(self) -> None:
@@ -315,7 +389,7 @@ class GoveeH613Device:
             if client is None or not client.is_connected:
                 return
             _LOGGER.debug("%s: disconnecting", self.name)
-            with contextlib.suppress(BLEAK_RETRY_EXCEPTIONS):
+            with contextlib.suppress(*BLEAK_RETRY_EXCEPTIONS):
                 await client.stop_notify(protocol.NOTIFY_CHAR_UUID)
             await client.disconnect()
 
@@ -337,7 +411,7 @@ class GoveeH613Device:
             return
         self._async_cancel_idle_timer()
         self._cancel_idle = async_call_later(
-            self.hass, IDLE_DISCONNECT_DELAY, self._async_idle_timeout
+            self.hass, const.IDLE_DISCONNECT_DELAY, self._async_idle_timeout
         )
 
     @callback
@@ -358,8 +432,11 @@ class GoveeH613Device:
     def _on_notification(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
         raw = bytes(data)
         _LOGGER.debug("%s: <- %s", self.name, raw.hex())
+        for probe in self._probes:
+            probe.append(raw.hex())
+
         reply = protocol.parse_reply(raw)
-        if reply is None:
+        if reply is None or isinstance(reply, protocol.AckReply):
             return
 
         if isinstance(reply, protocol.FirmwareReply):
@@ -367,24 +444,38 @@ class GoveeH613Device:
             self._async_fire()
             return
 
-        # A reply already in flight when a command was sent describes the old
-        # state; keep what we just commanded for a moment.
-        if time.monotonic() - self._last_command < COMMAND_GRACE:
+        if (
+            isinstance(reply, protocol.BrightnessReply)
+            and self._scale_setting == "auto"
+            and reply.level > 100
+            and self._detected_scale != 255
+        ):
+            _LOGGER.info(
+                "%s: brightness reported as %s, using a 0-255 scale", self.name, reply.level
+            )
+            self._detected_scale = 255
+
+        # A reply to a query sent before a command describes the old state;
+        # keep what we just commanded for a moment.
+        if time.monotonic() - self._last_command < const.COMMAND_GRACE:
             return
 
         state = self.state
-        before = (state.is_on, state.brightness_pct, state.rgb, state.kelvin, state.other_mode)
+        before = (state.is_on, state.brightness_level, state.rgb, state.kelvin, state.other_mode)
         match reply:
             case protocol.PowerReply(is_on=is_on):
                 state.is_on = is_on
-            case protocol.BrightnessReply(percent=percent):
-                state.brightness_pct = percent
+            case protocol.BrightnessReply(level=level):
+                state.brightness_level = level
             case protocol.ColorReply(rgb=rgb, kelvin=kelvin):
-                state.rgb = rgb
-                state.kelvin = kelvin or None
-                state.other_mode = None
+                # Some firmwares report 00 00 00 when the colour was set in
+                # another dialect: that says nothing about what is shown.
+                if rgb != (0, 0, 0) or kelvin:
+                    state.rgb = rgb
+                    state.kelvin = kelvin or None
+                    state.other_mode = None
             case protocol.OtherModeReply(mode=mode):
                 state.other_mode = mode
-        after = (state.is_on, state.brightness_pct, state.rgb, state.kelvin, state.other_mode)
+        after = (state.is_on, state.brightness_level, state.rgb, state.kelvin, state.other_mode)
         if after != before:
             self._async_fire()
