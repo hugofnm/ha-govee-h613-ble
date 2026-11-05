@@ -1,0 +1,58 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Configurer {name} ({address}) ?\n\nFerme d'abord l'app Govee : le ruban n'accepte qu'une seule connexion Bluetooth à la fois."
+      },
+      "user": {
+        "description": "Choisis le ruban à ajouter.",
+        "data": {
+          "address": "Ruban"
+        }
+      },
+      "manual": {
+        "description": "Aucun ruban n'émet pour l'instant (il cesse d'émettre quand l'app Govee y est connectée). Saisis son adresse MAC Bluetooth.",
+        "data": {
+          "address": "Adresse MAC",
+          "model": "Modèle"
+        },
+        "data_description": {
+          "address": "Par exemple A4:C1:38:12:34:56. Les 4 derniers caractères du nom annoncé (ihoment_H613D_XXXX) en sont la fin."
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Adresse MAC invalide, format attendu : AA:BB:CC:DD:EE:FF."
+    },
+    "abort": {
+      "already_configured": "Ce ruban est déjà configuré.",
+      "already_in_progress": "La configuration de ce ruban est déjà en cours.",
+      "not_supported": "Cet appareil Govee n'est pas pris en charge par cette intégration."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "keep_connected": "Garder la connexion Bluetooth ouverte"
+        },
+        "data_description": {
+          "keep_connected": "Activé : commandes instantanées, et les changements faits avec le boîtier ou l'app remontent dans Home Assistant, mais un slot de connexion Bluetooth reste occupé et l'app Govee ne peut plus se connecter. Désactivé : connexion uniquement pour les commandes, déconnexion après 30 s."
+        }
+      }
+    }
+  },
+  "selector": {
+    "device": {
+      "options": {
+        "manual": "Saisir une adresse MAC à la main"
+      }
+    }
+  },
+  "exceptions": {
+    "cannot_reach": {
+      "message": "Impossible de joindre {name} en Bluetooth : {error}"
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "domain": "govee_h613_ble",
+  "name": "Govee H613x BLE",
+  "bluetooth": [
+    {
+      "local_name": "ihoment_H613D*",
+      "connectable": true
+    },
+    {
+      "local_name": "Govee_H613D*",
+      "connectable": true
+    },
+    {
+      "local_name": "GBK_H613D*",
+      "connectable": true
+    },
+    {
+      "local_name": "ihoment_H613B*",
+      "connectable": true
+    },
+    {
+      "local_name": "Govee_H613B*",
+      "connectable": true
+    },
+    {
+      "local_name": "GBK_H613B*",
+      "connectable": true
+    },
+    {
+      "local_name": "ihoment_H613A*",
+      "connectable": true
+    },
+    {
+      "local_name": "Govee_H613A*",
+      "connectable": true
+    },
+    {
+      "local_name": "GBK_H613A*",
+      "connectable": true
+    }
+  ],
+  "codeowners": [
+    "@hugofnm"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "bluetooth_adapters"
+  ],
+  "documentation": "https://github.com/hugofnm/ha-govee-h613-ble",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/hugofnm/ha-govee-h613-ble/issues",
+  "loggers": [
+    "custom_components.govee_h613_ble",
+    "bleak_retry_connector"
+  ],
+  "requirements": [],
+  "version": "0.1.0"
+}

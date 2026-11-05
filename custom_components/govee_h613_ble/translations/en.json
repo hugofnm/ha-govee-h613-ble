@@ -1,0 +1,58 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Set up {name} ({address})?\n\nClose the Govee app first: the strip accepts only one Bluetooth connection at a time."
+      },
+      "user": {
+        "description": "Pick the strip to add.",
+        "data": {
+          "address": "Strip"
+        }
+      },
+      "manual": {
+        "description": "No strip is advertising right now (it stops advertising while the Govee app is connected to it). Enter its Bluetooth MAC address.",
+        "data": {
+          "address": "MAC address",
+          "model": "Model"
+        },
+        "data_description": {
+          "address": "For example A4:C1:38:12:34:56. The last 4 characters of the advertised name (ihoment_H613D_XXXX) are the end of it."
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Invalid MAC address, expected AA:BB:CC:DD:EE:FF."
+    },
+    "abort": {
+      "already_configured": "This strip is already configured.",
+      "already_in_progress": "Setup of this strip is already in progress.",
+      "not_supported": "This Govee device is not supported by this integration."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "keep_connected": "Keep the Bluetooth connection open"
+        },
+        "data_description": {
+          "keep_connected": "On: instant commands, and changes made with the control box or the app show up in Home Assistant, but one Bluetooth connection slot stays in use and the Govee app cannot connect. Off: connects only for commands and disconnects after 30 s."
+        }
+      }
+    }
+  },
+  "selector": {
+    "device": {
+      "options": {
+        "manual": "Enter a MAC address manually"
+      }
+    }
+  },
+  "exceptions": {
+    "cannot_reach": {
+      "message": "Cannot reach {name} over Bluetooth: {error}"
+    }
+  }
+}
