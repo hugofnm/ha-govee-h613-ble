@@ -46,8 +46,8 @@ Requires Home Assistant 2025.3 or newer with the Bluetooth integration working.
 | Option | Default | Effect |
 | --- | --- | --- |
 | Keep the Bluetooth connection open | on | Instant commands and live state; uses one connection slot of the adapter/proxy permanently, and the Govee app cannot connect meanwhile. Turn off to connect only when sending a command. |
-| Colour protocol | `0x0D` | Colour frame the firmware understands: `0x0D`, `0x02` (legacy) or `0x15` (segmented). H613D firmwares differ; if colours do nothing, find the right one with **Send raw frame** below. |
-| Brightness scale | auto | `0-100` or `0-255`. Auto switches to 0-255 as soon as the strip reports a level above 100. |
+| Colour protocol | H613D: `0x02` · H613A/B: `0x0D` | Colour frame the firmware understands. If colours do nothing, try the other one (or probe with **Send raw frame** below). |
+| Brightness scale | H613D: `0-255` · H613A/B: auto | `0-100` or `0-255`. Auto switches to 0-255 as soon as the strip reports a level above 100. |
 
 ### Finding the right frames: Send raw frame
 
@@ -65,13 +65,18 @@ data:
 The response lists what the strip answered (`33 05 00` is only an ack: the firmware
 acks frames it then ignores, so watch the strip itself).
 
+> Do not send the segmented RGBIC frame (`33 05 15 …`) to an H613x: the LEDs go black and
+> stay black, even after power off/on, until a valid colour frame is sent.
+
 ## Supported models
 
 | Model | Status | Notes |
 | --- | --- | --- |
-| H613D | Field-tested: power, state read-back; reports brightness 0–255 | 2 × 10 m RGB strip; colour dialect varies by firmware (see options) |
-| H613B | Protocol captured by gilcu3 on real hardware | same frames |
-| H613A | Listed with the same mode by hardcpp | same frames |
+| H613D | Tested on a real strip | colour `33 05 02`, brightness 0–255 |
+| H613B | Protocol captured by gilcu3 on real hardware | colour `33 05 0D`, brightness 0–100 |
+| H613A | Reported by hardcpp | colour `33 05 0D`, brightness 0–100 |
+
+Another firmware revision may use the other dialect: switch it in the options.
 
 ## Protocol cheat sheet
 
@@ -82,8 +87,8 @@ acks frames it then ignores, so watch the strip itself).
 | --- | --- |
 | Power on / off | `33 01 01` / `33 01 00` |
 | Brightness | `33 04 <level>` (0–100 or 0–255 depending on firmware) |
-| RGB | `33 05 0D RR GG BB` · `33 05 02 RR GG BB` · `33 05 15 01 RR GG BB 00×5 FF 7F` |
-| White | `33 05 0D FF FF FF <K hi> <K lo> WR WG WB` |
+| RGB | `33 05 02 RR GG BB` (H613D) · `33 05 0D RR GG BB` (H613A/B) |
+| White | `33 05 0D FF FF FF <K hi> <K lo> WR WG WB`; in `0x02`, the white's RGB |
 | Query power / brightness / colour / firmware | `AA 01` / `AA 04` / `AA 05 01` / `AA 06` |
 
 Every command is acked with `33 <cmd> 00`, even one the firmware ignores. Frames written

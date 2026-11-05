@@ -163,14 +163,14 @@ async def test_persistent_mode_reads_state(
     assert client.writes[:4] == [protocol.QUERY_FIRMWARE, *protocol.STATE_QUERIES]
 
     client.reply(reply("aa0101"))  # on
-    client.reply(reply("aa0436"))  # 54 %
+    client.reply(reply("aa0480"))  # 128 on the H613D's 0-255 scale
     client.reply(reply("aa050d00ff00"))  # green
     client.reply(reply("aa06322e30342e3030"))  # firmware 2.04.00
     await hass.async_block_till_done()
 
     state = hass.states.get(ENTITY_ID)
     assert state.state == STATE_ON
-    assert state.attributes["brightness"] == 138
+    assert state.attributes["brightness"] == 128
     assert state.attributes["rgb_color"] == (0, 255, 0)
     assert state.attributes["color_mode"] == "rgb"
 
@@ -189,8 +189,9 @@ async def test_persistent_mode_reads_state(
 
 
 @pytest.mark.usefixtures("bluetooth_ready")
-async def test_commands(hass: HomeAssistant, connector: FakeConnector) -> None:
-    await _setup(hass)
+async def test_commands_0x0d_firmware(hass: HomeAssistant, connector: FakeConnector) -> None:
+    """H613A/H613B-style firmware: 0x0D colour, 0-100 brightness."""
+    await _setup(hass, **{CONF_COLOR_DIALECT: "0x0d", CONF_BRIGHTNESS_SCALE: "100"})
     client = connector.client
     client.writes.clear()
 
@@ -353,8 +354,42 @@ async def test_real_h613d_replies(hass: HomeAssistant, connector: FakeConnector)
 
 
 @pytest.mark.usefixtures("bluetooth_ready")
-async def test_forced_scale_and_dialect(hass: HomeAssistant, connector: FakeConnector) -> None:
-    await _setup(hass, **{CONF_COLOR_DIALECT: "0x02", CONF_BRIGHTNESS_SCALE: "255"})
+async def test_h613d_defaults(hass: HomeAssistant, connector: FakeConnector) -> None:
+    """What worked on a real H613D: 0x02 colour, 0-255 brightness."""
+    entry = await _setup(hass)
+    assert entry.runtime_data.color_dialect is protocol.ColorDialect.MODE_02
+    assert entry.runtime_data.brightness_scale == 255
+    client = connector.client
+    client.writes.clear()
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": ENTITY_ID, "rgb_color": [255, 0, 0], "brightness": 64},
+        blocking=True,
+    )
+    # the exact frames tested by hand on the strip
+    assert client.writes == [
+        protocol.cmd_power(True),
+        protocol.frame_from_hex("33 05 02 ff 00 00"),
+        protocol.frame_from_hex("33 04 40"),
+    ]
+
+    # white is rendered as RGB in the 0x02 dialect
+    client.writes.clear()
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": ENTITY_ID, "color_temp_kelvin": 2700}, blocking=True
+    )
+    (white,) = client.writes
+    assert white[:3] == bytes.fromhex("330502")
+    assert hass.states.get(ENTITY_ID).attributes["color_temp_kelvin"] == 2700
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_options_override_model_defaults(
+    hass: HomeAssistant, connector: FakeConnector
+) -> None:
+    await _setup(hass, **{CONF_COLOR_DIALECT: "0x0d", CONF_BRIGHTNESS_SCALE: "100"})
     client = connector.client
     client.writes.clear()
 
@@ -366,8 +401,8 @@ async def test_forced_scale_and_dialect(hass: HomeAssistant, connector: FakeConn
     )
     assert client.writes == [
         protocol.cmd_power(True),
-        protocol.build_frame(0x33, 0x05, [0x02, 0xFF, 0x00, 0x00]),
-        protocol.cmd_brightness(255),
+        protocol.frame_from_hex("33 05 0d ff 00 00"),
+        protocol.cmd_brightness(100),
     ]
 
 

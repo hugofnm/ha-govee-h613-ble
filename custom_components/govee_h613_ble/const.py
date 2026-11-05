@@ -11,13 +11,26 @@ CONF_MODEL: Final = "model"
 CONF_KEEP_CONNECTED: Final = "keep_connected"
 DEFAULT_KEEP_CONNECTED: Final = True
 CONF_COLOR_DIALECT: Final = "color_dialect"
-DEFAULT_COLOR_DIALECT: Final = "0x0d"
-CONF_BRIGHTNESS_SCALE: Final = "brightness_scale"
-DEFAULT_BRIGHTNESS_SCALE: Final = "auto"  # "auto", "100" or "255"
+CONF_BRIGHTNESS_SCALE: Final = "brightness_scale"  # "auto", "100" or "255"
 
 # The H613x family. Firmwares differ in colour dialect and brightness scale,
 # hence the options (CONF_COLOR_DIALECT, CONF_BRIGHTNESS_SCALE).
 SUPPORTED_MODELS: Final = ("H613D", "H613B", "H613A")
+
+# (colour dialect, brightness scale) used until the user changes the options.
+# H613D: tested on a real strip. H613A/H613B: from the reference projects.
+MODEL_DEFAULTS: Final[dict[str, tuple[str, str]]] = {
+    "H613D": ("0x02", "255"),
+    "H613B": ("0x0d", "auto"),
+    "H613A": ("0x0d", "auto"),
+}
+FALLBACK_DEFAULTS: Final = ("0x0d", "auto")
+
+
+def model_defaults(model: str) -> tuple[str, str]:
+    """Default (colour dialect, brightness scale) for a model."""
+    return MODEL_DEFAULTS.get(model, FALLBACK_DEFAULTS)
+
 
 # Govee advertises "<prefix>_<model>_<last 4 hex of the MAC>", e.g. "ihoment_H613D_1A2B".
 _NAME_RE: Final = re.compile(r"^(?:Govee|ihoment|GBK)_(H[0-9A-Z]{4})(?:_|$)", re.IGNORECASE)

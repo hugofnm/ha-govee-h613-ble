@@ -48,8 +48,7 @@ def test_rgb_frame_dialects() -> None:
     assert legacy[:6] == h("33 05 02 ff 00 00")
     assert legacy[6:19] == bytes(13)
 
-    segments = protocol.cmd_rgb((255, 0, 0), protocol.ColorDialect.MODE_15)
-    assert segments[:14] == h("33 05 15 01 ff 00 00 00 00 00 00 00 ff 7f")
+    assert [d.value for d in protocol.ColorDialect] == ["0x0d", "0x02"]  # never 0x15
 
 
 def test_white_in_each_dialect() -> None:
@@ -57,8 +56,6 @@ def test_white_in_each_dialect() -> None:
     assert protocol.cmd_white(2000, warm, protocol.ColorDialect.MODE_02) == protocol.cmd_rgb(
         warm, protocol.ColorDialect.MODE_02
     )
-    seg = protocol.cmd_white(2000, warm, protocol.ColorDialect.MODE_15)
-    assert seg[:14] == h("33 05 15 01 ff ff ff 07 d0 ff 89 12 ff 7f")
 
 
 def test_white_frame_matches_app_capture() -> None:
@@ -80,7 +77,7 @@ def test_every_frame_is_20_bytes_with_valid_checksum() -> None:
         protocol.cmd_power(True),
         protocol.cmd_brightness(42),
         protocol.cmd_rgb((1, 2, 3)),
-        protocol.cmd_rgb((1, 2, 3), protocol.ColorDialect.MODE_15),
+        protocol.cmd_rgb((1, 2, 3), protocol.ColorDialect.MODE_02),
         protocol.cmd_white(4000, (255, 213, 161)),
         *protocol.STATE_QUERIES,
         protocol.QUERY_FIRMWARE,

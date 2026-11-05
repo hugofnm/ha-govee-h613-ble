@@ -11,10 +11,9 @@ from .const import (
     CONF_COLOR_DIALECT,
     CONF_KEEP_CONNECTED,
     CONF_MODEL,
-    DEFAULT_BRIGHTNESS_SCALE,
-    DEFAULT_COLOR_DIALECT,
     DEFAULT_KEEP_CONNECTED,
     DOMAIN,
+    model_defaults,
 )
 from .device import GoveeH613Device
 
@@ -25,14 +24,16 @@ type GoveeH613ConfigEntry = ConfigEntry[GoveeH613Device]
 
 async def async_setup_entry(hass: HomeAssistant, entry: GoveeH613ConfigEntry) -> bool:
     """Set up a strip from a config entry."""
+    model = entry.data[CONF_MODEL]
+    default_dialect, default_scale = model_defaults(model)
     device = GoveeH613Device(
         hass,
         address=entry.data[CONF_ADDRESS],
         name=entry.title,
-        model=entry.data[CONF_MODEL],
+        model=model,
         keep_connected=entry.options.get(CONF_KEEP_CONNECTED, DEFAULT_KEEP_CONNECTED),
-        color_dialect=entry.options.get(CONF_COLOR_DIALECT, DEFAULT_COLOR_DIALECT),
-        brightness_scale=entry.options.get(CONF_BRIGHTNESS_SCALE, DEFAULT_BRIGHTNESS_SCALE),
+        color_dialect=entry.options.get(CONF_COLOR_DIALECT, default_dialect),
+        brightness_scale=entry.options.get(CONF_BRIGHTNESS_SCALE, default_scale),
     )
     entry.runtime_data = device
 

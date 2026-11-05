@@ -73,8 +73,8 @@ class GoveeH613Device:
         model: str,
         *,
         keep_connected: bool = const.DEFAULT_KEEP_CONNECTED,
-        color_dialect: str = const.DEFAULT_COLOR_DIALECT,
-        brightness_scale: str = const.DEFAULT_BRIGHTNESS_SCALE,
+        color_dialect: str = const.FALLBACK_DEFAULTS[0],
+        brightness_scale: str = const.FALLBACK_DEFAULTS[1],
     ) -> None:
         """Initialise."""
         self.hass = hass

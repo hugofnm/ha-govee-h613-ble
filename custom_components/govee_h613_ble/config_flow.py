@@ -29,11 +29,10 @@ from .const import (
     CONF_COLOR_DIALECT,
     CONF_KEEP_CONNECTED,
     CONF_MODEL,
-    DEFAULT_BRIGHTNESS_SCALE,
-    DEFAULT_COLOR_DIALECT,
     DEFAULT_KEEP_CONNECTED,
     DOMAIN,
     SUPPORTED_MODELS,
+    model_defaults,
     model_from_name,
 )
 from .protocol import ColorDialect
@@ -178,6 +177,7 @@ class GoveeH613OptionsFlow(OptionsFlow):
             return self.async_create_entry(data=user_input)
 
         options = self.config_entry.options
+        default_dialect, default_scale = model_defaults(self.config_entry.data[CONF_MODEL])
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -188,7 +188,7 @@ class GoveeH613OptionsFlow(OptionsFlow):
                     ): bool,
                     vol.Required(
                         CONF_COLOR_DIALECT,
-                        default=options.get(CONF_COLOR_DIALECT, DEFAULT_COLOR_DIALECT),
+                        default=options.get(CONF_COLOR_DIALECT, default_dialect),
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=[d.value for d in ColorDialect],
@@ -198,7 +198,7 @@ class GoveeH613OptionsFlow(OptionsFlow):
                     ),
                     vol.Required(
                         CONF_BRIGHTNESS_SCALE,
-                        default=options.get(CONF_BRIGHTNESS_SCALE, DEFAULT_BRIGHTNESS_SCALE),
+                        default=options.get(CONF_BRIGHTNESS_SCALE, default_scale),
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=["auto", "100", "255"],

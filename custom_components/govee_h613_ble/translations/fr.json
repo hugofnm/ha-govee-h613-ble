@@ -41,7 +41,7 @@
         },
         "data_description": {
           "keep_connected": "Activé : commandes instantanées, et les changements faits avec le boîtier ou l'app remontent dans Home Assistant, mais un slot de connexion Bluetooth reste occupé et l'app Govee ne peut plus se connecter. Désactivé : connexion uniquement pour les commandes, déconnexion après 30 s.",
-          "color_dialect": "La trame couleur que comprend le firmware. Si les couleurs ne font rien, essaie-en une autre (l'action « Envoyer une trame brute » aide à trouver la bonne).",
+          "color_dialect": "La trame couleur que comprend le firmware. Si les couleurs ne font rien, essaie l'autre.",
           "brightness_scale": "Plage du niveau de luminosité du firmware. Auto passe en 0-255 dès que le ruban annonce un niveau supérieur à 100."
         }
       }
@@ -55,9 +55,8 @@
     },
     "color_dialect": {
       "options": {
-        "0x0d": "0x0D (H613A/H613B, firmwares récents)",
-        "0x02": "0x02 (rubans RGB anciens)",
-        "0x15": "0x15 (rubans segmentés)"
+        "0x02": "0x02 (H613D)",
+        "0x0d": "0x0D (H613A, H613B, firmwares récents)"
       }
     },
     "brightness_scale": {

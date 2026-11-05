@@ -16,28 +16,29 @@ frame the firmware does not understand is acked and then ignored.
     33 01 01 / 33 01 00          power on / off
     33 04 <level>                brightness, 0..100 or 0..255 depending on firmware
 
-Colour, three dialects seen across Govee firmwares:
+Colour, two dialects depending on the firmware:
 
+    0x02  33 05 02 R G B                        H613D (tested), legacy RGB strips
     0x0D  33 05 0D R G B [KH KL WR WG WB]       H613A/H613B, newer firmwares
-    0x02  33 05 02 R G B                        legacy RGB strips
-    0x15  33 05 15 01 R G B 00 00 00 00 00 FF 7F  segmented (RGBIC) strips
 
     For white, 0x0D carries the Kelvin (KH KL) and the RGB to render (WR WG WB);
-    0x15 carries the same after its segment byte; 0x02 only gets the RGB.
+    0x02 only gets the RGB. A firmware acks the other dialect's frame and ignores
+    it. Never send the segmented RGBIC frame (33 05 15 ...) to an H613D: it turns
+    the LEDs black until a valid colour frame is sent.
 
 Queries and replies (notified on ...2b10):
 
     AA 01        -> AA 01 <00|01>                 power
-    AA 04        -> AA 04 <level>                 brightness (raw level)
+    AA 04        -> AA 04 <level>                 brightness (raw level; H613D: 0..255)
     AA 05 01     -> AA 05 <mode> R G B [KH KL]    colour
     AA 06        -> AA 06 <ASCII firmware>        e.g. "2.04.00"
 
 The firmware ignores frames written back-to-back: keep about 200 ms between
 writes.
 
-Sources: Beshelmek/govee_ble_lights (frame, checksum, 0x02/0x15, write pacing),
-hardcpp/GoveeBleMqttServer (0x0D for H613A/H613D), gilcu3/govee-btled-H613B
-(0xAA replies), and captures from a real H613D.
+Sources: Beshelmek/govee_ble_lights (frame, checksum, 0x02, write pacing),
+hardcpp/GoveeBleMqttServer (0x0D for H613A), gilcu3/govee-btled-H613B (0xAA
+replies), and tests on a real H613D (0x02 colour, 0..255 brightness).
 """
 
 from __future__ import annotations
@@ -76,13 +77,10 @@ class ColorDialect(StrEnum):
 
     MODE_0D = "0x0d"
     MODE_02 = "0x02"
-    MODE_15 = "0x15"
 
 
 MODE_0D = 0x0D
 MODE_02 = 0x02
-MODE_15 = 0x15
-_SEGMENTS_ALL = (0xFF, 0x7F)
 
 
 def checksum(data: bytes) -> int:
@@ -142,12 +140,8 @@ def cmd_brightness(level: int) -> bytes:
 def cmd_rgb(rgb: tuple[int, int, int], dialect: ColorDialect = ColorDialect.MODE_0D) -> bytes:
     """Static RGB colour."""
     r, g, b = _rgb(rgb)
-    if dialect is ColorDialect.MODE_02:
-        payload = [MODE_02, r, g, b]
-    elif dialect is ColorDialect.MODE_15:
-        payload = [MODE_15, 0x01, r, g, b, 0, 0, 0, 0, 0, *_SEGMENTS_ALL]
-    else:
-        payload = [MODE_0D, r, g, b]
+    mode = MODE_02 if dialect is ColorDialect.MODE_02 else MODE_0D
+    payload = [mode, r, g, b]
     return build_frame(Head.COMMAND, Cmd.COLOR, payload)
 
 
@@ -162,10 +156,7 @@ def cmd_white(
     kh, kl = kelvin >> 8, kelvin & 0xFF
     if dialect is ColorDialect.MODE_02:
         return cmd_rgb(white_rgb, dialect)
-    if dialect is ColorDialect.MODE_15:
-        payload = [MODE_15, 0x01, 0xFF, 0xFF, 0xFF, kh, kl, wr, wg, wb, *_SEGMENTS_ALL]
-    else:
-        payload = [MODE_0D, 0xFF, 0xFF, 0xFF, kh, kl, wr, wg, wb]
+    payload = [MODE_0D, 0xFF, 0xFF, 0xFF, kh, kl, wr, wg, wb]
     return build_frame(Head.COMMAND, Cmd.COLOR, payload)
 
 

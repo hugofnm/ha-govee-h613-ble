@@ -41,7 +41,7 @@
         },
         "data_description": {
           "keep_connected": "On: instant commands, and changes made with the control box or the app show up in Home Assistant, but one Bluetooth connection slot stays in use and the Govee app cannot connect. Off: connects only for commands and disconnects after 30 s.",
-          "color_dialect": "Which colour frame the firmware understands. If colours do nothing, try another one (the Send raw frame action helps find it).",
+          "color_dialect": "Which colour frame the firmware understands. If colours do nothing, try the other one.",
           "brightness_scale": "Range of the firmware's brightness level. Auto switches to 0-255 as soon as the strip reports a level above 100."
         }
       }
@@ -55,9 +55,8 @@
     },
     "color_dialect": {
       "options": {
-        "0x0d": "0x0D (H613A/H613B, newer firmwares)",
-        "0x02": "0x02 (legacy RGB strips)",
-        "0x15": "0x15 (segmented strips)"
+        "0x02": "0x02 (H613D)",
+        "0x0d": "0x0D (H613A, H613B, newer firmwares)"
       }
     },
     "brightness_scale": {
