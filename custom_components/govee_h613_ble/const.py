@@ -46,9 +46,18 @@ WRITE_GAP: Final = 0.2
 POWER_ON_SETTLE: Final = 0.4
 # On-demand mode: disconnect after this long without a command.
 IDLE_DISCONNECT_DELAY: Final = 30.0
-# Reconnect back-off in persistent mode.
+# Reconnect back-off in persistent mode, while Home Assistant still lists the
+# strip as present. It restarts from the minimum when the strip reappears.
 RECONNECT_MIN_DELAY: Final = 2.0
-RECONNECT_MAX_DELAY: Final = 60.0
+RECONNECT_MAX_DELAY: Final = 300.0
+# A strip only accepts a connection while it advertises (it stops when another
+# central, e.g. the Govee app, holds it, and when it is unpowered). No attempt is
+# made while Home Assistant's Bluetooth considers it gone; its presence is
+# checked this often (a dictionary lookup, no radio traffic).
+PRESENCE_POLL_INTERVAL: Final = 1.0
+# Attempts per connection (bleak-retry-connector's default is 4, plus transient
+# errors on top).
+CONNECT_ATTEMPTS: Final = 3
 # After a command, ignore state replies for this long so a reply to a query sent
 # before the command cannot flip the entity back to the previous state.
 COMMAND_GRACE: Final = 0.8

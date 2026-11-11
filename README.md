@@ -107,8 +107,20 @@ logger:
 
 - *Not discovered*: check that the Govee app is closed and that the strip appears under
   Settings → Bluetooth → Advertisement monitor.
-- *Unavailable after a while in persistent mode*: the adapter may be out of connection
-  slots (each BLE device that keeps a link uses one); try on-demand mode or an ESPHome proxy.
+- *"not heard by any Bluetooth adapter"*: Home Assistant's Bluetooth no longer lists the
+  strip (unpowered, out of range, or held by the Govee app: it then stops advertising). The
+  integration waits without touching the radio and reconnects as soon as it is heard again.
+- *"cannot reach the strip"* while the strip is heard: connection attempts fail. They are
+  retried with a back-off of up to 5 minutes. **Download diagnostics** (device page → ⋮)
+  shows the last error, the RSSI, and the free connection slots of each adapter; a stale
+  slot or `free_slots: 0` points at the adapter rather than the strip, and rebooting the
+  host (not just Home Assistant: BlueZ runs in the host) clears it.
+- *Weak signal*: below about −85 dBm the link is unreliable. Move the strip or the host,
+  prefer Ethernet over Wi-Fi on a Raspberry Pi (Wi-Fi and Bluetooth share one chip), or add
+  an [ESPHome Bluetooth proxy](https://esphome.io/projects/?type=bluetooth) near it.
+- *"Failed to cancel connection … Bad file descriptor"* from `bleak.backends.bluezdbus`:
+  BlueZ logs it after a failed connection attempt. Before 0.1.1 the integration retried
+  blindly and could produce thousands of them.
 
 ## Limitations
 

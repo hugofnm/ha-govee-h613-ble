@@ -43,7 +43,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH613ConfigEntry) ->
         await device.async_stop()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_stop))
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    options = dict(entry.options)
+
+    async def _async_entry_updated(hass: HomeAssistant, updated: GoveeH613ConfigEntry) -> None:
+        """Reload on option changes only.
+
+        Home Assistant also updates the entry on its own (Bluetooth discovery
+        keys) and on renames: neither needs the link to be torn down.
+        """
+        device.name = updated.title
+        if dict(updated.options) != options:
+            await hass.config_entries.async_reload(updated.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -74,8 +86,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: GoveeH613ConfigEntry) -
     if unloaded:
         await entry.runtime_data.async_stop()
     return unloaded
-
-
-async def _async_options_updated(hass: HomeAssistant, entry: GoveeH613ConfigEntry) -> None:
-    """Reload when an option changes."""
-    await hass.config_entries.async_reload(entry.entry_id)

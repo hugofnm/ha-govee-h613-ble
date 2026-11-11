@@ -11,6 +11,7 @@ from unittest.mock import patch
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from homeassistant.components.bluetooth import (
+    MONOTONIC_TIME,
     BluetoothServiceInfoBleak,
     async_get_advertisement_callback,
 )
@@ -42,6 +43,7 @@ def fast_writes() -> Generator[None]:
     with (
         patch("custom_components.govee_h613_ble.const.WRITE_GAP", 0.0),
         patch("custom_components.govee_h613_ble.const.POWER_ON_SETTLE", 0.0),
+        patch("custom_components.govee_h613_ble.const.PRESENCE_POLL_INTERVAL", 0.01),
     ):
         yield
 
@@ -53,8 +55,10 @@ async def bluetooth_ready(hass: HomeAssistant) -> None:
     await hass.async_block_till_done()
 
 
-def service_info(name: str = NAME, address: str = ADDRESS) -> BluetoothServiceInfoBleak:
-    """What Home Assistant sees when the strip advertises."""
+def service_info(
+    name: str = NAME, address: str = ADDRESS, age: float = 0.0
+) -> BluetoothServiceInfoBleak:
+    """What Home Assistant sees when the strip advertises (``age`` seconds ago)."""
     adv = AdvertisementData(
         local_name=name,
         manufacturer_data={},
@@ -75,7 +79,7 @@ def service_info(name: str = NAME, address: str = ADDRESS) -> BluetoothServiceIn
         device=BLEDevice(address, name, None),
         advertisement=adv,
         connectable=True,
-        time=time.monotonic(),
+        time=MONOTONIC_TIME() - age,
         tx_power=None,
     )
 
@@ -88,8 +92,13 @@ def inject(hass: HomeAssistant, info: BluetoothServiceInfoBleak | None = None) -
 class FakeClient:
     """Stands in for BleakClientWithServiceCache connected to a strip."""
 
-    def __init__(self, disconnected_callback: Callable[[Any], None] | None) -> None:
+    def __init__(
+        self,
+        disconnected_callback: Callable[[Any], None] | None,
+        on_link_loss: Callable[[], None],
+    ) -> None:
         self.is_connected = True
+        self._on_link_loss = on_link_loss
         self.writes: list[bytes] = []
         self.times: list[float] = []
         self.responder: Callable[[bytes], list[bytes]] | None = None
@@ -116,12 +125,14 @@ class FakeClient:
         self.is_connected = False
         if self._disconnected_callback:
             self._disconnected_callback(self)
+        self._on_link_loss()
 
     def drop(self) -> None:
-        """Simulate the strip going away."""
+        """Simulate the link dropping (the strip then advertises, unless told not to)."""
         self.is_connected = False
         if self._disconnected_callback:
             self._disconnected_callback(self)
+        self._on_link_loss()
 
     def reply(self, frame: bytes) -> None:
         """Simulate a notification from the strip."""
@@ -130,18 +141,32 @@ class FakeClient:
 
 
 class FakeConnector:
-    """Patches establish_connection and records every client it hands out."""
+    """Patches establish_connection and records every client it hands out.
 
-    def __init__(self) -> None:
+    Like a real strip, it advertises again right after a link is closed, unless
+    ``advertising`` is False (unpowered, out of range, held by the Govee app).
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
         self.clients: list[FakeClient] = []
+        self.attempts = 0
+        self.attempt_times: list[float] = []
         self.fail: Exception | None = None
+        self.advertising = True
+
+    def _on_link_loss(self) -> None:
+        if self.advertising:
+            self.hass.loop.call_soon(inject, self.hass)
 
     async def __call__(
         self, _cls: Any, _device: Any, _name: str, *, disconnected_callback=None, **_kw: Any
     ) -> FakeClient:
+        self.attempts += 1
+        self.attempt_times.append(time.monotonic())
         if self.fail is not None:
             raise self.fail
-        client = FakeClient(disconnected_callback)
+        client = FakeClient(disconnected_callback, self._on_link_loss)
         self.clients.append(client)
         return client
 
@@ -151,8 +176,8 @@ class FakeConnector:
 
 
 @pytest.fixture
-def connector() -> Generator[FakeConnector]:
+def connector(hass: HomeAssistant) -> Generator[FakeConnector]:
     """A fake strip reachable over BLE."""
-    fake = FakeConnector()
+    fake = FakeConnector(hass)
     with patch("custom_components.govee_h613_ble.device.establish_connection", fake):
         yield fake

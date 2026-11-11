@@ -12,6 +12,14 @@ Two connection modes:
 
 Every write goes through one paced queue: the firmware silently drops frames
 that arrive back-to-back.
+
+Connections are only attempted while Home Assistant's Bluetooth lists the strip
+as present (heard recently by a connectable adapter or proxy), with a back-off
+of up to 5 minutes between failures: a strip that is unpowered, out of range or
+held by the Govee app cannot be connected to, and blind retries only flood the
+adapter (each failed attempt also makes BlueZ log "Failed to cancel connection").
+Presence, not the age of the last advertisement, is the test: a local BlueZ
+adapter does not report every advertisement, only changes.
 """
 
 from __future__ import annotations
@@ -49,6 +57,10 @@ WriteItem = bytes | float
 
 class DeviceNotFoundError(Exception):
     """No connectable Bluetooth adapter or proxy currently sees the strip."""
+
+
+class NotAdvertisingError(DeviceNotFoundError):
+    """Home Assistant's Bluetooth no longer hears the strip."""
 
 
 @dataclass(slots=True)
@@ -99,9 +111,15 @@ class GoveeH613Device:
         self._refresh_pending = True
         self._poll_paused_until = 0.0
         self._probes: list[list[str]] = []
+        self._wake = asyncio.Event()  # cuts the keep-alive sleep short on link loss
         self._present = False
         self._logged_unavailable = False
+        self._logged_waiting = False
         self._stopping = False
+        # For diagnostics.
+        self.stats: dict[str, int] = {"connects": 0, "connect_failures": 0, "link_losses": 0}
+        self.last_error: str | None = None
+        self.connected_at: float | None = None  # time.monotonic()
 
     # --- public state -----------------------------------------------------
 
@@ -118,6 +136,19 @@ class GoveeH613Device:
         if self.keep_connected:
             return self._last_ok is not None and time.monotonic() - self._last_ok < _RECONNECT_GRACE
         return self._present
+
+    @property
+    def last_advertisement_age(self) -> float | None:
+        """Seconds since a connectable adapter or proxy last heard the strip."""
+        info = bluetooth.async_last_service_info(self.hass, self.address, connectable=True)
+        if info is None:
+            return None
+        return bluetooth.MONOTONIC_TIME() - info.time
+
+    @property
+    def reachable(self) -> bool:
+        """Return True while a connectable adapter or proxy lists the strip as present."""
+        return bluetooth.async_address_present(self.hass, self.address, connectable=True)
 
     @property
     def brightness_scale(self) -> int:
@@ -196,6 +227,18 @@ class GoveeH613Device:
                 await asyncio.sleep(0.2)
                 continue
 
+            if not self.is_connected and not self.reachable:
+                if not self._logged_waiting:
+                    _LOGGER.info(
+                        "%s: not heard by any Bluetooth adapter (unpowered, out of range or "
+                        "connected to the Govee app), waiting for it",
+                        self.name,
+                    )
+                    self._logged_waiting = True
+                await self._async_sleep(None, until_reachable=True)
+                delay = const.RECONNECT_MIN_DELAY
+                continue
+
             full = cycle % const.FULL_REFRESH_EVERY == 0 or (
                 self._refresh_pending
                 and time.monotonic() - self._last_command > const.COMMAND_GRACE
@@ -211,21 +254,43 @@ class GoveeH613Device:
                         err,
                     )
                     self._logged_unavailable = True
-                _LOGGER.debug("%s: keep-alive failed", self.name, exc_info=True)
+                _LOGGER.debug(
+                    "%s: keep-alive failed, next try in %.0f s", self.name, delay, exc_info=True
+                )
                 await self._async_disconnect()
                 self._async_fire()
-                await asyncio.sleep(delay)
+                # Cut short if the strip disappears: then wait for it instead.
+                await self._async_sleep(delay, until_reachable=False)
                 delay = min(delay * 2, const.RECONNECT_MAX_DELAY)
                 continue
 
             if full:
                 self._refresh_pending = False
-            if self._logged_unavailable:
+            if self._logged_unavailable or self._logged_waiting:
                 _LOGGER.info("%s: connection restored", self.name)
-                self._logged_unavailable = False
+                self._logged_unavailable = self._logged_waiting = False
             delay = const.RECONNECT_MIN_DELAY
             cycle += 1
-            await asyncio.sleep(const.KEEPALIVE_INTERVAL)
+            self._wake.clear()
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(const.KEEPALIVE_INTERVAL):
+                    await self._wake.wait()
+
+    async def _async_sleep(self, limit: float | None, *, until_reachable: bool) -> None:
+        """Sleep up to ``limit`` s (forever if None), watching the strip's presence.
+
+        Returns early when presence becomes ``until_reachable``, and on stop.
+        Fires the callbacks if the availability changes meanwhile.
+        """
+        deadline = None if limit is None else time.monotonic() + limit
+        was_available = self.available
+        while not self._stopping and self.reachable is not until_reachable:
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(const.PRESENCE_POLL_INTERVAL)
+            if self.available != was_available:
+                was_available = self.available
+                self._async_fire()
 
     async def async_refresh(self) -> None:
         """Read the state once (connects if needed)."""
@@ -314,20 +379,34 @@ class GoveeH613Device:
                 self._async_reset_idle_timer()
                 return client
 
+            if not self.reachable:
+                age = self.last_advertisement_age
+                seen = "never heard" if age is None else f"last heard {age:.0f} s ago"
+                raise NotAdvertisingError(
+                    f"not heard by any Bluetooth adapter ({seen}): unpowered, out of "
+                    "range, or connected to the Govee app"
+                )
+
             if (ble_device := self._ble_device()) is None:
                 raise DeviceNotFoundError(
                     f"{self.address} is not seen by any connectable Bluetooth adapter"
                 )
 
             _LOGGER.debug("%s: connecting", self.name)
-            client = await establish_connection(
-                BleakClientWithServiceCache,
-                ble_device,
-                self.name,
-                disconnected_callback=self._on_disconnected,
-                use_services_cache=True,
-                ble_device_callback=lambda: self._ble_device() or ble_device,
-            )
+            try:
+                client = await establish_connection(
+                    BleakClientWithServiceCache,
+                    ble_device,
+                    self.name,
+                    disconnected_callback=self._on_disconnected,
+                    max_attempts=const.CONNECT_ATTEMPTS,
+                    use_services_cache=True,
+                    ble_device_callback=lambda: self._ble_device() or ble_device,
+                )
+            except Exception as err:
+                self.stats["connect_failures"] += 1
+                self.last_error = f"{type(err).__name__}: {err}"
+                raise
             try:
                 await client.start_notify(protocol.NOTIFY_CHAR_UUID, self._on_notification)
                 # Ask what the strip is showing right away; the firmware once.
@@ -340,6 +419,8 @@ class GoveeH613Device:
 
             _LOGGER.debug("%s: connected", self.name)
             self._client = client
+            self.stats["connects"] += 1
+            self.connected_at = time.monotonic()
             self._last_ok = time.monotonic()
 
         self._async_reset_idle_timer()
@@ -399,6 +480,8 @@ class GoveeH613Device:
             return  # an old client we already replaced
         if self._client is not None:
             _LOGGER.debug("%s: disconnected unexpectedly", self.name)
+            self.stats["link_losses"] += 1
+            self._wake.set()
         self._client = None
         self._async_cancel_idle_timer()
         self._async_fire()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+import itertools
+import json
+from unittest.mock import PropertyMock, patch
 
 from bleak.exc import BleakError
 from homeassistant.config_entries import SOURCE_BLUETOOTH, SOURCE_USER, ConfigEntryState
@@ -24,6 +26,8 @@ from custom_components.govee_h613_ble.const import (
     DOMAIN,
     model_from_name,
 )
+from custom_components.govee_h613_ble.device import GoveeH613Device
+from custom_components.govee_h613_ble.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import ADDRESS, FakeConnector, inject, service_info
 
@@ -464,3 +468,117 @@ async def test_send_raw(hass: HomeAssistant, connector: FakeConnector) -> None:
             blocking=True,
             return_response=True,
         )
+
+
+# --- reconnection only while Home Assistant hears the strip -------------------
+
+
+async def _wait_for(predicate, limit: float = 2.0) -> None:
+    """Let background tasks run until ``predicate()`` holds."""
+    for _ in range(int(limit / 0.01)):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def _presence(value: bool):
+    """Pretend Home Assistant's Bluetooth lists the strip as present or gone."""
+    return patch.object(GoveeH613Device, "reachable", new_callable=PropertyMock, return_value=value)
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_no_attempt_until_the_strip_is_heard(
+    hass: HomeAssistant, connector: FakeConnector
+) -> None:
+    """Never heard since start-up (unpowered): no connection attempt at all."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=ADDRESS,
+        title="Govee H613D 3456",
+        data={CONF_ADDRESS: ADDRESS, CONF_MODEL: "H613D"},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await asyncio.sleep(0.2)
+    await hass.async_block_till_done()
+
+    assert connector.attempts == 0
+    assert hass.states.get(ENTITY_ID).state == STATE_UNAVAILABLE
+
+    # powered on: the first advertisement brings it in
+    inject(hass)
+    await _wait_for(lambda: connector.attempts == 1)
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_ID).state != STATE_UNAVAILABLE
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_strip_gone_means_no_attempts(hass: HomeAssistant, connector: FakeConnector) -> None:
+    """Govee app or power cut: once Home Assistant stops listing it, nothing is tried."""
+    entry = await _setup(hass)
+    device = entry.runtime_data
+    with _presence(False):
+        connector.client.drop()
+        await asyncio.sleep(0.3)
+        assert connector.attempts == 1  # only the first, successful connection
+        assert not device.is_connected
+
+    # heard again: reconnects right away
+    await _wait_for(lambda: device.is_connected)
+    assert connector.attempts == 2
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_failures_back_off_while_strip_is_heard(
+    hass: HomeAssistant, connector: FakeConnector
+) -> None:
+    """Heard but refusing connections: retries spaced out, not hammered."""
+    with patch("custom_components.govee_h613_ble.const.RECONNECT_MIN_DELAY", 0.05):
+        entry = await _setup(hass)
+        device = entry.runtime_data
+        connector.fail = BleakError("timeout")
+        connector.client.drop()
+        await _wait_for(lambda: connector.attempts >= 5)
+    gaps = [b - a for a, b in itertools.pairwise(connector.attempt_times[1:])]
+    assert all(later > earlier * 1.5 for earlier, later in itertools.pairwise(gaps))
+
+    # it disappears, then comes back: the back-off restarts from the minimum
+    with _presence(False):
+        before = connector.attempts
+        await asyncio.sleep(0.5)
+        assert connector.attempts == before
+    connector.fail = None
+    await _wait_for(lambda: device.is_connected, limit=1.0)
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_command_fails_fast_when_strip_is_gone(
+    hass: HomeAssistant, connector: FakeConnector
+) -> None:
+    await _setup(hass, keep_connected=False)
+    await entry_device(hass)._async_idle_timeout(None)
+    attempts = connector.attempts
+
+    with _presence(False), pytest.raises(HomeAssistantError, match="not heard"):
+        await hass.services.async_call("light", "turn_on", {"entity_id": ENTITY_ID}, blocking=True)
+    assert connector.attempts == attempts
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_diagnostics(hass: HomeAssistant, connector: FakeConnector) -> None:
+    entry = await _setup(hass)
+    connector.client.reply(reply("aa06322e30342e3030"))
+    connector.fail = BleakError("le-connection-abort-by-local")
+    with patch("custom_components.govee_h613_ble.const.RECONNECT_MIN_DELAY", 10):
+        connector.client.drop()
+        await _wait_for(lambda: entry.runtime_data.stats["connect_failures"] == 1)
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    json.dumps(diag)  # what "Download diagnostics" does
+    assert diag["device"]["firmware"] == "2.04.00"
+    assert diag["device"]["stats"] == {"connects": 1, "connect_failures": 1, "link_losses": 1}
+    assert diag["device"]["last_error"] == "BleakError: le-connection-abort-by-local"
+    assert diag["device"]["reachable"] is True
+    assert diag["bluetooth"]["last_advertisement"]["rssi"] == -60
+    assert diag["bluetooth"]["last_advertisement"]["connectable"] is True
