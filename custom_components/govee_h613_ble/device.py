@@ -34,9 +34,11 @@ from typing import Any
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import (
     BLEAK_RETRY_EXCEPTIONS,
     BleakClientWithServiceCache,
+    close_stale_connections_by_address,
     establish_connection,
 )
 from homeassistant.components import bluetooth
@@ -120,6 +122,7 @@ class GoveeH613Device:
         self.stats: dict[str, int] = {"connects": 0, "connect_failures": 0, "link_losses": 0}
         self.last_error: str | None = None
         self.connected_at: float | None = None  # time.monotonic()
+        self.connecting_since: float | None = None  # time.monotonic()
 
     # --- public state -----------------------------------------------------
 
@@ -393,20 +396,33 @@ class GoveeH613Device:
                 )
 
             _LOGGER.debug("%s: connecting", self.name)
+            self.connecting_since = time.monotonic()
             try:
-                client = await establish_connection(
-                    BleakClientWithServiceCache,
-                    ble_device,
-                    self.name,
-                    disconnected_callback=self._on_disconnected,
-                    max_attempts=const.CONNECT_ATTEMPTS,
-                    use_services_cache=True,
-                    ble_device_callback=lambda: self._ble_device() or ble_device,
-                )
+                async with asyncio.timeout(const.CONNECT_TIMEOUT):
+                    # We hold no client here, so any link BlueZ still has to the
+                    # strip is a leftover (previous Home Assistant process, failed
+                    # attempt whose cancel never reached BlueZ). It blocks new
+                    # connections and keeps a slot: drop it first.
+                    await close_stale_connections_by_address(self.address)
+                    client = await establish_connection(
+                        BleakClientWithServiceCache,
+                        ble_device,
+                        self.name,
+                        disconnected_callback=self._on_disconnected,
+                        max_attempts=const.CONNECT_ATTEMPTS,
+                        use_services_cache=True,
+                        ble_device_callback=lambda: self._ble_device() or ble_device,
+                    )
+            except TimeoutError as err:
+                self.stats["connect_failures"] += 1
+                self.last_error = f"no connection after {const.CONNECT_TIMEOUT:.0f} s"
+                raise BleakError(self.last_error) from err
             except Exception as err:
                 self.stats["connect_failures"] += 1
                 self.last_error = f"{type(err).__name__}: {err}"
                 raise
+            finally:
+                self.connecting_since = None
             try:
                 await client.start_notify(protocol.NOTIFY_CHAR_UUID, self._on_notification)
                 # Ask what the strip is showing right away; the firmware once.

@@ -58,6 +58,8 @@ PRESENCE_POLL_INTERVAL: Final = 1.0
 # Attempts per connection (bleak-retry-connector's default is 4, plus transient
 # errors on top).
 CONNECT_ATTEMPTS: Final = 3
+# Hard limit on one connection (all attempts): it must never hang for good.
+CONNECT_TIMEOUT: Final = 90.0
 # After a command, ignore state replies for this long so a reply to a query sent
 # before the command cannot flip the entity back to the previous state.
 COMMAND_GRACE: Final = 0.8

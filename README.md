@@ -112,9 +112,10 @@ logger:
   integration waits without touching the radio and reconnects as soon as it is heard again.
 - *"cannot reach the strip"* while the strip is heard: connection attempts fail. They are
   retried with a back-off of up to 5 minutes. **Download diagnostics** (device page → ⋮)
-  shows the last error, the RSSI, and the free connection slots of each adapter; a stale
-  slot or `free_slots: 0` points at the adapter rather than the strip, and rebooting the
-  host (not just Home Assistant: BlueZ runs in the host) clears it.
+  shows the last error, the RSSI, the free connection slots of each adapter and the links
+  BlueZ itself holds. A link left in BlueZ by a previous Home Assistant process blocks new
+  connections; since 0.1.2 it is closed automatically before each connection. By hand, on
+  the host: `bluetoothctl disconnect <MAC>`.
 - *Weak signal*: below about −85 dBm the link is unreliable. Move the strip or the host,
   prefer Ethernet over Wi-Fi on a Raspberry Pi (Wi-Fi and Bluetooth share one chip), or add
   an [ESPHome Bluetooth proxy](https://esphome.io/projects/?type=bluetooth) near it.

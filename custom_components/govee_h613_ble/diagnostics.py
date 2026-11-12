@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
+from bleak_retry_connector import get_connected_devices
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 
@@ -39,6 +41,16 @@ async def async_get_config_entry_diagnostics(
             }
         )
 
+    # What BlueZ itself thinks (Linux hosts only): a link it holds while we are
+    # not connected is a leftover that blocks new connections.
+    bluez_connected: list[str] | None = None
+    if info is not None:
+        try:
+            async with asyncio.timeout(5):
+                bluez_connected = [str(d.details) for d in await get_connected_devices(info.device)]
+        except Exception as err:  # noqa: BLE001 - diagnostics must not fail
+            bluez_connected = [f"error: {type(err).__name__}: {err}"]
+
     return {
         "entry": {"title": entry.title, "data": dict(entry.data), "options": dict(entry.options)},
         "device": {
@@ -49,6 +61,7 @@ async def async_get_config_entry_diagnostics(
             "brightness_scale": device.brightness_scale,
             "connected": device.is_connected,
             "connected_for_s": _age(device.connected_at, now) if device.is_connected else None,
+            "connecting_for_s": _age(device.connecting_since, now),
             "available": device.available,
             "reachable": device.reachable,
             "last_error": device.last_error,
@@ -74,6 +87,7 @@ async def async_get_config_entry_diagnostics(
             "learned_advertising_interval_s": bluetooth.async_get_learned_advertising_interval(
                 hass, device.address
             ),
+            "bluez_connected_devices": bluez_connected,
             "scanners": scanners,
         },
     }

@@ -582,3 +582,36 @@ async def test_diagnostics(hass: HomeAssistant, connector: FakeConnector) -> Non
     assert diag["device"]["reachable"] is True
     assert diag["bluetooth"]["last_advertisement"]["rssi"] == -60
     assert diag["bluetooth"]["last_advertisement"]["connectable"] is True
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_stale_bluez_link_is_closed_before_connecting(
+    hass: HomeAssistant, connector: FakeConnector
+) -> None:
+    """A link left in BlueZ by a previous process is dropped before each connection."""
+    with patch(
+        "custom_components.govee_h613_ble.device.close_stale_connections_by_address"
+    ) as close_stale:
+        await _setup(hass)
+        close_stale.assert_awaited_once_with(ADDRESS)
+        connector.client.drop()
+        await _wait_for(lambda: connector.attempts == 2)
+        assert close_stale.await_count == 2
+
+
+@pytest.mark.usefixtures("bluetooth_ready")
+async def test_connection_cannot_hang_forever(
+    hass: HomeAssistant, connector: FakeConnector
+) -> None:
+    async def hang(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    with (
+        patch("custom_components.govee_h613_ble.device.establish_connection", hang),
+        patch("custom_components.govee_h613_ble.const.CONNECT_TIMEOUT", 0.05),
+    ):
+        entry = await _setup(hass)
+        device = entry.runtime_data
+        await _wait_for(lambda: device.stats["connect_failures"] >= 1)
+    assert device.last_error == "no connection after 0 s"
+    assert device.connecting_since is None
